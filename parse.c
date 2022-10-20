@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <string.h>
 
+static FILE* out_file;
 static FILE* trace_data;
 static mapping_node* mapping;
 static unsigned long offset;
@@ -41,10 +42,12 @@ static unsigned long size;
 
 int main() 
 {
-    // TODO: remove this used for testing 
+    // TODO: change this to args
     char trace_file_name[] = "trace-dump.pt";
     char mapping_file_name[] = "mapping-data.mpt";
+    char trace_out_file_name[] = "trace-out.txt";
 
+    load_output_file(trace_out_file_name);
     load_mapping_file(mapping_file_name);
     load_trace_file(trace_file_name);
     
@@ -292,7 +295,7 @@ static bool parse_tip(void)
 
     unsigned long guest_ip = get_mapping(last_ip);
 
-    //printf("%lu\n", guest_ip);
+    log_basic_block(guest_ip);
 
     ADVANCE(TIP_PACKET_LENGTH - last_ip_use);
 
@@ -880,4 +883,21 @@ static unsigned long get_mapping(unsigned long host_pc)
     }
     if(output != 0) printf("%lu\n", output);
     return output;
+}
+
+
+static void load_output_file(char *file_name)
+{
+    out_file = fopen(file_name, "w");
+
+    if(trace_data == NULL) {
+        fprintf(stderr, "Failed to open trace output file: %s\n", file_name);
+        exit(EXIT_FAILURE);
+    }
+}
+
+
+static void log_basic_block(unsigned long id) 
+{
+    fprintf(out_file, "%lu,", id);
 }

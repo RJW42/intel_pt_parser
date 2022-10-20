@@ -5,6 +5,9 @@
 
 static unsigned long get_mapping(unsigned long host_pc);
 
+static void log_basic_block(unsigned long id);
+
+static void load_output_file(char *file_name);
 static void load_trace_file(char *file_name);
 static void load_mapping_file(char *file_name);
 static void parse();
