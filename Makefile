@@ -1,8 +1,8 @@
 CC=gcc
 CFALGS=--wall
 
-DEPS=parse-internal.h parse-oppcode.h
-OBJ=parse.o
+DEPS:=pt-parse-internal.h pt-parse-oppcode.h asm-parse-internal.h asm-parse.h
+OBJ:=asm-parse.o pt-parse.o
 
 %.o: %.c $(DEPS)
 	$(CC) -c -o $@ $< $(CFLAGS)
@@ -10,7 +10,7 @@ OBJ=parse.o
 main: parser
 
 parser: $(OBJ)
-	$(CC) -o $@ $< $(CFLAGS)
+	$(CC) -o $@ $^ $(CFLAGS)
 
 clean: 
-	rm ./parser $(OBJ)
+	rm -f ./parser $(OBJ)
