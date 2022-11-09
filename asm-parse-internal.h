@@ -4,41 +4,44 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-typedef enum block_type {
-    IN,
-    OUT,
-    PROLOGUE,
-    UNSET
-} block_type;
+#include "types.h"
 
-typedef enum instruction_type {
-    UNKOWN,
-    JMP
-} instruction_type;
+typedef enum trace_type {
+    BLOCK,
+    JXX,
+    JMP,
+    LABEL,
+    UPDATE,
+    IPT_START,
+    IPT_STOP
+} trace_type;
 
 
-typedef struct instruction {
-    unsigned long ip;
-    instruction_type type;
+typedef struct trace_element {
+    trace_type type;
     union {
-        unsigned long jmp_location;
+        u64 block_ip; /* block */
+
+        struct { /* jmp */
+            u64 loc;
+            u64 des;
+        } jmp;
+        
+        struct { /* jxx */
+            u64 loc;
+            u32 id;
+        } jxx;
+
+        struct { /* label */
+            u64 loc;
+            u32 id;
+        } label;
+
+        struct { /* Update */
+            u64 loc;
+            u64 new_des;
+        } update;
     } data;
-} instruction;
+} trace_element;
 
-
-static void open_asm_file(const char* file_name);
-
-static void parse_asm_file();
-
-static bool parse_empty_line(const char *buffer, size_t length);
-static bool parse_comment(const char* buffer, size_t length);
-static bool parse_block_break(const char* buffer, size_t length);
-static bool parse_block_type(const char* buffer, size_t length, block_type *curr_type);
-
-static bool parse_instruction(const char* buffer, size_t length, instruction *inst);
-static unsigned long parse_instruction_pointer(const char* buffer);
-static instruction_type parse_instruction_type(const char* buffer, size_t length);
-
-
-static bool starts_with(const char *s1, const char *s2);
 #endif

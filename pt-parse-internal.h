@@ -2,6 +2,7 @@
 #define PT_PARSE_INTERNAL_H_
 
 #include <stdbool.h>
+#include <vector>
 
 static unsigned long get_mapping(unsigned long host_pc);
 
@@ -12,7 +13,7 @@ static void load_trace_file(char *file_name);
 static void load_mapping_file(char *file_name);
 static void parse();
 
-static bool parse_tnt(void);
+static bool parse_tnt(std::vector<bool>& tnt);
 static bool parse_tip(void);
 static bool parse_pip(void);
 static bool parse_mode(void);
