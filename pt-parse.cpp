@@ -1,5 +1,6 @@
-#include "asm-parse.h"
 #include "types.h"
+
+#include "asm-parse.h"
 
 #include "pt-parse-internal.h"
 #include "pt-parse-oppcode.h"
@@ -55,13 +56,15 @@ int main()
     // char trace_file_name[] = "traces/hw1-prog0-trace-dump.pt";
     // char mapping_file_name[] = "traces/hw1-prog0-mapping-data.mpt";
     // char trace_out_file_name[] = "traces/trace-out.txt";
-    // char asm_file_name[] = "trace_hw2/asm-trace.txt";
 
-    char trace_file_name[] =     "trace_hw1/trace-dump.pt";
-    char mapping_file_name[] =   "trace_hw1/mapping-data.mpt";
-    char trace_out_file_name[] = "trace_hw1/trace-dump.txt";
+    char asm_file_name[] = "trace_hw2/asm-trace.txt";
+    char trace_file_name[] =     "trace_hw2/trace-dump.pt";
+    char mapping_file_name[] =   "trace_hw2/mapping-data.mpt";
+    char trace_out_file_name[] = "trace_hw2/trace-dump.txt";
 
-    // asm_init(asm_file_name);
+    use_asm = true;
+
+    asm_init(asm_file_name);
 
     load_output_file(trace_out_file_name);
     load_mapping_file(mapping_file_name);
@@ -79,6 +82,9 @@ void parse(void)
 {
     u32 pad_count = 0;
     bool was_pad = false;
+    bool use_tnt = false;
+    bool use_next_tnt = false;
+    bool in_psb_start = false;
 
 #ifdef DEBUG_MODE_
     printf("Size: %lu\n", size);
@@ -93,19 +99,53 @@ void parse(void)
 #endif  
             pad_count = 0;
         }
+
         was_pad = false;
+        use_tnt = use_next_tnt;
+        std::cout << (use_next_tnt ? "true" : "false") << " ";
+        use_next_tnt = in_psb_start ? use_next_tnt : false;
 
         if(parse_tnt(tnt_res)) {
+            if(!use_tnt || !use_asm) continue;
+
+            // Use the tnt packet to generate a list of ips
+            u64 ip = last_ip;
+
+            for(auto t : tnt_res) {
+                jmp j;
+                // printf(".");
+                for(j = get_next_jmp(ip); !j.conditional; j = get_next_jmp(ip)) {
+                    printf("  1.IP: %lX JMP: %lX -> %lX\n", ip, j.loc, j.des);
+                    ip = j.des;
+                    if(ip == 0x7fd040000018) goto fail;
+                    save_ip_mapping(ip);
+                }
+                
+                if(t) { 
+                    if(ip == 0x7fd040000018) goto fail;
+                    printf("  T.IP: %lX JMP: %lX -> %lX\n", ip, j.loc, j.des);
+                    ip = j.des;
+                    save_ip_mapping(ip);
+                } else {
+                    printf("  NT.IP: %lX JMP: %lX -> %lX\n", ip, j.loc, j.des);
+                    ip = j.loc + 1;
+                }
+            }
+            
+            use_next_tnt = true;
+            last_ip = ip;
+
+fail:
             continue;
         } 
-        else if(parse_tip()) {
+        else if(parse_tip(use_next_tnt)) {
             continue;
         }
         else if(parse_pip()) {
             continue;
         }
         else if(parse_mode()) {
-            if(use_asm) advance_to_mode();
+            if(use_asm && !in_psb_start) advance_to_mode();
             continue;
         }
         else if(parse_trace_stop()){
@@ -132,10 +172,10 @@ void parse(void)
         else if(parse_cyc()) {
             continue;
         }
-        else if(parse_psb()) {
+        else if(parse_psb(in_psb_start)) {
             continue;
         }
-        else if(parse_psb_end()) {
+        else if(parse_psb_end(in_psb_start)) {
             continue;
         }
         else if(parse_mnt()) {
@@ -191,6 +231,25 @@ void parse(void)
         fprintf(stdout, "Unkown: " BYTE_TO_BINARY_PATTERN "\n", BYTE_TO_BINARY(byte));
 #endif
     }
+}
+
+static void save_ip_mapping(unsigned long host_ip)
+{
+    u64 guest_ip = get_mapping(host_ip);
+
+    if(guest_ip == 0) return;
+    
+    log_basic_block(guest_ip);
+
+    #ifdef DEBUG_MODE_ 
+        printf("    IP: %lX", host_ip);
+
+        if(guest_ip != 0) {
+            printf(" Maps To %lX", guest_ip);
+        }
+
+        printf("\n");
+    #endif
 }
 
 
@@ -251,7 +310,7 @@ long_tnt:
 }
 
 
-static bool parse_tip(void) 
+static bool parse_tip(bool& use_next_tnt) 
 {
     if(!LEFT(TIP_PACKET_LENGTH))
         return false;
@@ -353,6 +412,7 @@ static bool parse_tip(void)
 
     if(guest_ip != 0) {
         printf(" Maps To %lX", guest_ip);
+        use_next_tnt = true;
     }
 
     printf("\n");
@@ -599,7 +659,7 @@ static bool parse_cyc(void)
 }
 
 
-static bool parse_psb(void)
+static bool parse_psb(bool& in_psb_start)
 {
     if(!LEFT(PSB_PACKET_LENGTH))
         return false;
@@ -617,14 +677,16 @@ static bool parse_psb(void)
     printf("PSB\n");
 #endif
 
+    in_psb_start = true;
+
     // Todo: Unsure if this is correct. 
-    last_ip = 0;
+    //last_ip = 0;
 
     return true;
 }
 
 
-static bool parse_psb_end(void)
+static bool parse_psb_end(bool& in_psb_start)
 {
     if(!LEFT(PSB_END_PACKET_LENGTH))
         return false;
@@ -640,6 +702,8 @@ static bool parse_psb_end(void)
 #ifdef DEBUG_MODE_
     printf("PSBEND\n");
 #endif
+
+    in_psb_start = false;
 
     return true;
 }

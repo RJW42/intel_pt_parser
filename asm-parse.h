@@ -13,6 +13,6 @@ struct jmp {
 void asm_init(const char* asm_file_name);
 void advance_to_mode(void);
 
-jmp get_next_jump(u64 ip);
+jmp get_next_jmp(u64 current_ip);
 
 #endif

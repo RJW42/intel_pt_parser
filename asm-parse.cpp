@@ -11,44 +11,48 @@
 #include <unordered_map>
 #include <map>
 
-using namespace std;
-
 #define ASM_PARSE_DEBUG_
 
-static ifstream asm_file;
-static map<u64, jmp> jmps;
+static std::ifstream asm_file;
+static std::map<u64, jmp> jmps;
 
 void asm_init(const char* asm_file_name) 
 {
-    asm_file = ifstream(asm_file_name);
+    asm_file = std::ifstream(asm_file_name);
 }
 
 /* ***** JMP Management ***** */
+
 jmp get_next_jmp(u64 current_ip) 
 {
+    using namespace std;
     auto low = jmps.lower_bound(current_ip);
 
     if(low == jmps.end()) {
-        cout << "Failed to find next jump for: " << current_ip << endl; 
+        printf("Failed to find next jump for: %lX\n", current_ip); 
         exit(EXIT_FAILURE);
     }
+
+    // printf(" Found: %lX\n", low->first);
 
     return low->second;
 }
 
 
 /* ***** Parsing ***** */
-static bool parse_block(string& line, trace_element& out);
-static bool parse_jmp(string& line, trace_element& out);
-static bool parse_jxx(string& line, trace_element& out);
-static bool parse_update(string& line, trace_element& out);
-static bool parse_label(string& line, trace_element& out);
-static bool parse_ipt_start(string& line, trace_element& out);
-static bool parse_ipt_stop(string& line, trace_element& out);
+
+static bool parse_block(std::string& line, trace_element& out);
+static bool parse_jmp(std::string& line, trace_element& out);
+static bool parse_jxx(std::string& line, trace_element& out);
+static bool parse_update(std::string& line, trace_element& out);
+static bool parse_label(std::string& line, trace_element& out);
+static bool parse_ipt_start(std::string& line, trace_element& out);
+static bool parse_ipt_stop(std::string& line, trace_element& out);
 
 
 void advance_to_mode(void)
 {
+    using namespace std;
     string line;
 
     /* Track jumps waiting for a label*/
@@ -67,13 +71,13 @@ void advance_to_mode(void)
             continue;
         } else if(parse_jmp(line, curr)) {
 #ifdef ASM_PARSE_DEBUG_
-            printf("JMP: 0x%lX 0x%lX\n", curr.data.jmp.loc, curr.data.jmp.des);
+            printf("  JMP: 0x%lX -> 0x%lX\n", curr.data.jmp.loc, curr.data.jmp.des);
 #endif
             // Store jmp
             jmps[curr.data.jmp.loc] = {curr.data.jmp.loc, curr.data.jmp.des, false};
         } else if(parse_jxx(line, curr)) {
 #ifdef ASM_PARSE_DEBUG_
-            printf("JXX: 0x%lX %u\n", curr.data.jxx.loc, curr.data.jxx.id);
+            printf("  JXX: 0x%lX -> %u\n", curr.data.jxx.loc, curr.data.jxx.id);
 #endif
             // Store this JXX until a label is found     
             if(unset_jxx.find(curr.data.jxx.id) != unset_jxx.end()) {
@@ -85,13 +89,13 @@ void advance_to_mode(void)
             continue;
         } else if(parse_update(line, curr)) {
 #ifdef ASM_PARSE_DEBUG_
-            printf("UPDATE: 0x%lX 0x%lX\n", curr.data.update.loc, curr.data.update.new_des);
+            printf("  UPDATE: 0x%lX -> 0x%lX\n", curr.data.update.loc, curr.data.update.new_des);
 #endif
             // Update jmp
             jmps[curr.data.update.loc] = {curr.data.update.loc, curr.data.update.new_des, jmps[curr.data.update.loc].conditional};
         } else if(parse_label(line, curr)) {
 #ifdef ASM_PARSE_DEBUG_
-            printf("LBL: %u 0x%lX\n", curr.data.label.id, curr.data.label.loc);
+            printf("  LBL: %u -> 0x%lX\n", curr.data.label.id, curr.data.label.loc);
 #endif      
             // Use this label to update any jxx insutrctions
             if(unset_jxx.find(curr.data.label.id) == unset_jxx.end()) {
@@ -106,7 +110,7 @@ void advance_to_mode(void)
             continue;
         } else if(parse_ipt_start(line, curr)) {
 #ifdef ASM_PARSE_DEBUG_ 
-            printf("IPT_START:\n");
+            printf("IPT_START:\n\n");
 #endif      
             if(unset_jxx.size() > 0) {
                 cout << "Reach ipt_start and there is still unset jxx instructions" << endl;
@@ -116,9 +120,9 @@ void advance_to_mode(void)
             // Finished parsing for now
             return;
         } else if(parse_ipt_stop(line, curr)) {
-#ifdef ASM_PARSE_DEBUG_
-            printf("IPT_STOP:\n");
-#endif      
+// #ifdef ASM_PARSE_DEBUG_
+//             printf("IPT_STOP:\n");
+// #endif      
             continue;
         } else {
             cout << "Error Unkownn String: " << line << endl;
@@ -128,8 +132,9 @@ void advance_to_mode(void)
 }
 
 
-static inline bool parse_block(string& line, trace_element& out) 
+static inline bool parse_block(std::string& line, trace_element& out) 
 {
+    using namespace std;
     if(!line.starts_with("BLOCK: 0x")) return false;
     line = line.erase(0, 9);
 
@@ -140,8 +145,9 @@ static inline bool parse_block(string& line, trace_element& out)
 }
 
 
-static inline bool parse_jmp(string& line, trace_element& out) 
+static inline bool parse_jmp(std::string& line, trace_element& out) 
 {
+    using namespace std;
     if(!line.starts_with("JMP")) return false;
     line = line.erase(0, 3);
 
@@ -163,8 +169,9 @@ static inline bool parse_jmp(string& line, trace_element& out)
 }
 
 
-static inline bool parse_jxx(string& line, trace_element& out)
+static inline bool parse_jxx(std::string& line, trace_element& out)
 {
+    using namespace std;
     if(!line.starts_with("JXX: 0x")) return false;
     line = line.erase(0, 7);
 
@@ -179,8 +186,9 @@ static inline bool parse_jxx(string& line, trace_element& out)
 }
 
 
-static inline bool parse_update(string& line, trace_element& out) 
+static inline bool parse_update(std::string& line, trace_element& out) 
 {
+    using namespace std;
     if(!line.starts_with("UPDATE: 0x")) return false;
     line = line.erase(0, 10);
     
@@ -194,8 +202,9 @@ static inline bool parse_update(string& line, trace_element& out)
     return true;
 }
 
-static inline bool parse_label(string& line, trace_element& out)
+static inline bool parse_label(std::string& line, trace_element& out)
 {
+    using namespace std;
     if(!line.starts_with("LBL: ")) return false;
     line = line.erase(0, 5);
 
@@ -210,15 +219,16 @@ static inline bool parse_label(string& line, trace_element& out)
 }
 
 
-static inline bool parse_ipt_start(string& line, trace_element& out)
+static inline bool parse_ipt_start(std::string& line, trace_element& out)
 {
+    using namespace std;
     if(!line.starts_with("IPT_START:")) return false;
     out.type = IPT_START;
     return true;
 }
 
 
-static inline bool parse_ipt_stop(string& line, trace_element& out)
+static inline bool parse_ipt_stop(std::string& line, trace_element& out)
 {
     if(!line.starts_with("IPT_STOP:")) return false;
     out.type = IPT_STOP;

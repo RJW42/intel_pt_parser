@@ -5,6 +5,7 @@
 #include <vector>
 
 static unsigned long get_mapping(unsigned long host_pc);
+static void save_ip_mapping(unsigned long host_ip);
 
 static void log_basic_block(unsigned long id);
 
@@ -14,7 +15,7 @@ static void load_mapping_file(char *file_name);
 static void parse();
 
 static bool parse_tnt(std::vector<bool>& tnt);
-static bool parse_tip(void);
+static bool parse_tip(bool& use_next_tnt);
 static bool parse_pip(void);
 static bool parse_mode(void);
 static bool parse_trace_stop(void);
@@ -25,8 +26,8 @@ static bool parse_tma(void);
 static bool parse_vmcs(void);
 static bool parse_ovf(void);
 static bool parse_cyc(void);
-static bool parse_psb(void);
-static bool parse_psb_end(void);
+static bool parse_psb(bool& in_psb_start);
+static bool parse_psb_end(bool& in_psb_start);
 static bool parse_mnt(void);
 static bool parse_pad(void);
 static bool parse_ptw(void);
