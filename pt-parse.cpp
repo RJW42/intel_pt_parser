@@ -2,6 +2,7 @@
 
 #include "asm-parse.h"
 
+#include "pt-parse-types.h"
 #include "pt-parse-internal.h"
 #include "pt-parse-oppcode.h"
 
@@ -193,9 +194,6 @@ fail:
             continue;
         }
         else if(parse_mwait()) {
-            continue;
-        }
-        else if(parse_pwre()) {
             continue;
         }
         else if(parse_pwre()) {

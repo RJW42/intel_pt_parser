@@ -1,6 +1,8 @@
 #ifndef PT_PARSE_INTERNAL_H_
 #define PT_PARSE_INTERNAL_H_
 
+#include "pt-parse-types.h"
+
 #include <stdbool.h>
 #include <vector>
 
@@ -45,11 +47,5 @@ static bool parse_tip_base(unsigned char *buffer);
 static bool parse_tip_pge(unsigned char *buffer);
 static bool parse_tip_pgd(unsigned char *buffer);
 static bool parse_tip_fup(unsigned char *buffer);
-
-typedef struct mapping_node {
-    unsigned long key;
-    unsigned long value;
-    struct mapping_node *next;
-} mapping_node;
 
 #endif
