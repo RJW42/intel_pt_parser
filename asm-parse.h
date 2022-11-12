@@ -15,4 +15,6 @@ void advance_to_mode(void);
 
 jmp get_next_jmp(u64 current_ip);
 
+bool ip_inside_block(u64 ip);
+
 #endif

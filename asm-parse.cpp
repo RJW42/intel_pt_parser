@@ -1,5 +1,6 @@
 #include "asm-parse-internal.h"
 #include "asm-parse.h"
+#include "types.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,7 @@
 
 static std::ifstream asm_file;
 static std::map<u64, jmp> jmps;
+static std::map<u64, u64> block_sizes;
 
 void asm_init(const char* asm_file_name) 
 {
@@ -39,40 +41,67 @@ jmp get_next_jmp(u64 current_ip)
 }
 
 
+bool ip_inside_block(u64 ip) 
+{
+    using namespace std;
+    auto low = block_sizes.upper_bound(ip);
+
+    if(low == block_sizes.begin()) {
+        return false;
+    }
+    low--;
+
+    if(!(ip < (low->first + low->second))) {
+        return false;
+    }
+
+    printf("  INSIDE: 0x%lX -> 0x%lX\n", ip, low->first);
+
+    return true;
+}
+
+
 /* ***** Parsing ***** */
-
-static bool parse_block(std::string& line, trace_element& out);
-static bool parse_jmp(std::string& line, trace_element& out);
-static bool parse_jxx(std::string& line, trace_element& out);
-static bool parse_update(std::string& line, trace_element& out);
-static bool parse_label(std::string& line, trace_element& out);
-static bool parse_ipt_start(std::string& line, trace_element& out);
-static bool parse_ipt_stop(std::string& line, trace_element& out);
-
 
 void advance_to_mode(void)
 {
     using namespace std;
     string line;
+    static int calls = 0;
+    calls++;
 
     /* Track jumps waiting for a label*/
     unordered_map<int, trace_element> unset_jxx; 
+    u64 current_block = 0;
 
     while(getline(asm_file, line)) {
         trace_element curr;
 
         if(parse_block(line, curr)) {
 #ifdef ASM_PARSE_DEBUG_
-            printf("BLOCK: 0x%lX\n", curr.data.block_ip);
+            printf("\nBLOCK: 0x%lX\n", curr.data.block_ip);
 #endif
+            current_block = curr.data.block_ip;
             // Don't need to do anything in perticular for a block
             //  todo: is this true, maybe want to check if there
             //        are unset jumps 
             continue;
-        } else if(parse_jmp(line, curr)) {
+        } else if(parse_block_size(line, curr)) {
+#ifdef ASM_PARSE_DEBUG_
+            printf("BLOCK_SIZE: %lu\n", curr.data.block_size);
+#endif      
+            if(current_block == 0) {
+                printf("    Error found block size without a block to map too\n");
+                exit(EXIT_FAILURE);
+            }
+
+            block_sizes[current_block] = curr.data.block_size;
+            current_block = 0;
+        }else if(parse_jmp(line, curr)) {
 #ifdef ASM_PARSE_DEBUG_
             printf("  JMP: 0x%lX -> 0x%lX\n", curr.data.jmp.loc, curr.data.jmp.des);
 #endif
+            
             // Store jmp
             jmps[curr.data.jmp.loc] = {curr.data.jmp.loc, curr.data.jmp.des, false};
         } else if(parse_jxx(line, curr)) {
@@ -87,6 +116,13 @@ void advance_to_mode(void)
 
             unset_jxx[curr.data.jxx.id] = curr;      
             continue;
+        } else if(parse_jxx_ldst(line, curr)) {
+#ifdef ASM_PARSE_DEBUG_
+            printf("  JXX_LDST: 0x%lX -> 0x%lX\n", curr.data.jxx_ldst.loc, curr.data.jxx_ldst.des);
+#endif
+            
+            // Store jmp
+            jmps[curr.data.jxx_ldst.loc] = {curr.data.jxx_ldst.loc, curr.data.jxx_ldst.des, true};
         } else if(parse_update(line, curr)) {
 #ifdef ASM_PARSE_DEBUG_
             printf("  UPDATE: 0x%lX -> 0x%lX\n", curr.data.update.loc, curr.data.update.new_des);
@@ -129,6 +165,9 @@ void advance_to_mode(void)
             exit(EXIT_FAILURE);
         }
     }
+
+    cout << "Reached end of file, advanced to far: " << calls << endl;
+    exit(EXIT_FAILURE);
 }
 
 
@@ -185,6 +224,22 @@ static inline bool parse_jxx(std::string& line, trace_element& out)
     return true;
 }
 
+static inline bool parse_jxx_ldst(std::string& line, trace_element& out)
+{
+    using namespace std;
+    if(!line.starts_with("JXX_LDST: 0x")) return false;
+    line = line.erase(0, 12);
+
+    string loc_string = line.substr(0, line.find(" "));
+    string des_string = line.erase(0, loc_string.length() + 3);
+    
+    out.type = JXX_LDST;
+    out.data.jxx_ldst.loc = stoul(loc_string, nullptr, 16);
+    out.data.jxx_ldst.des = stoul(loc_string, nullptr, 16);
+
+    return true;
+}
+
 
 static inline bool parse_update(std::string& line, trace_element& out) 
 {
@@ -232,6 +287,18 @@ static inline bool parse_ipt_stop(std::string& line, trace_element& out)
 {
     if(!line.starts_with("IPT_STOP:")) return false;
     out.type = IPT_STOP;
+    return true;
+}
+
+
+static inline bool parse_block_size(std::string& line, trace_element& out)
+{
+    if(!line.starts_with("BLOCK_SIZE: ")) return false;
+    line.erase(0, 12);
+
+    out.type = BLOCK_SIZE;
+    out.data.block_size = stol(line);
+
     return true;
 }
 
