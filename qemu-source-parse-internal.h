@@ -2,33 +2,13 @@
 #define QEMU_SOURCE_PARSE_INTERNAL_H_
 
 #include "types.h"
+#include "qemu-source-parse.h"
 
 #include <unordered_set>
 #include <unordered_map>
 #include <string>
 #include <vector>
 #include <optional>
-
-enum qemu_asm_type {
-    JMP,
-    JXX,
-    CALL,
-    RET,
-    OTHER
-};
-
-
-struct qemu_asm_instruction {
-    qemu_asm_type type;
-    u64 loc;
-    std::optional<u64> des;
-
-    qemu_asm_instruction() {};
-    qemu_asm_instruction(qemu_asm_type type, u64 loc) :
-        type(type), loc(loc) {};
-    qemu_asm_instruction(qemu_asm_type type, u64 loc, std::optional<u64> des) :
-        type(type), loc(loc), des(des) {};
-};
 
 
 struct qemu_helper_function {
@@ -54,12 +34,12 @@ static void find_and_parse_jump_region(
     std::unordered_map<std::string, u64>& translated_functions
 );
 
-static qemu_asm_instruction parse_line(
+static src_asm_instruction parse_line(
     std::string line, std::unordered_set<std::string>& functions_to_translate,
     std::unordered_map<std::string, u64>& translated_functions
 );
 
-static qemu_asm_type parse_line_type(std::string line);
+static src_asm_type parse_line_type(std::string line);
 
 
 static std::optional<qemu_helper_function> get_corisponding_func(u64 loc);

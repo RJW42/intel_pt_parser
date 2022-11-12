@@ -17,6 +17,7 @@
 #include <iostream>
 #include <ostream>
 #include <optional>
+#include <stack>
 
 static FILE* out_file;
 static FILE* trace_data;
@@ -67,23 +68,22 @@ int main()
     // char mapping_file_name[] = "traces/hw1-prog0-mapping-data.mpt";
     // char trace_out_file_name[] = "traces/trace-out.txt";
 
-    // char asm_file_name[] = "trace_hw2/asm-trace.txt";
-    // char trace_file_name[] =     "trace_hw2/trace-dump.pt";
-    // char mapping_file_name[] =   "trace_hw2/mapping-data.mpt";
-    // char trace_out_file_name[] = "trace_hw2/trace-dump.txt";
+    char asm_file_name[] = "trace_hw2/asm-trace.txt";
+    char trace_file_name[] =     "trace_hw2/trace-dump.pt";
+    char mapping_file_name[] =   "trace_hw2/mapping-data.mpt";
+    char trace_out_file_name[] = "trace_hw2/trace-dump.txt";
     char qemu_source_file_name[] = "/home/rjw24/Downloads/qemu-asm.txt";
-    char qemu_call_file_name[] = "trace_hw2/calls.txt";
 
-    // use_asm = true;
+    use_asm = true;
 
-    // asm_init(asm_file_name);
-    qemu_source_init(qemu_source_file_name, qemu_call_file_name);
+    qemu_source_init(qemu_source_file_name, asm_file_name);
+    asm_init(asm_file_name);
 
-    // load_output_file(trace_out_file_name);
-    // load_mapping_file(mapping_file_name);
-    // load_trace_file(trace_file_name);
+    load_output_file(trace_out_file_name);
+    load_mapping_file(mapping_file_name);
+    load_trace_file(trace_file_name);
     
-    // parse();
+    parse();
 
     // fclose(out_file);
 }
@@ -92,15 +92,20 @@ int main()
 void parse(void) 
 {
 #ifdef DEBUG_MODE_
+    printf(" -------- Intel PT Start ---------- \n\n");
     printf("Size: %lu\n", size);
 #endif
-    u64 qemu_caller_ip = 0x5577334241A6;
-    u64 qemu_return_ip = 0x7f5850000018;
+    u64 qemu_caller_ip = 0x55E8347EA1D6;
+    u64 qemu_return_ip = 0x7F99B7F7F018;
+    u64 qemu_memory_offset = 0;
 
     u64 current_ip = 0;
     u64 pad_count = 0;
     bool in_psb = false;
     bool follow_next_tnt = false;
+
+    std::stack<u64> call_stack;
+
 
     while(offset < size) {
         // Parse The Current Packet
@@ -110,35 +115,36 @@ void parse(void)
         // Handle This Packet
         if(packet.type == TIP) {
             // Update Current IP
-            update_current_ip(current_ip, packet.tip_data.ip, qemu_caller_ip, follow_next_tnt);
-
-            // Todo: Need to track some kind of size associated with blocks
-            //       then whever I see a new pointer, if that pointer is within a block
-            //       I should follow the next tnt packet if one exists. Or maybe even can then 
-            //       follow the next undonditional jumps after it 
+            update_current_ip(
+                current_ip, packet.tip_data.ip, 
+                qemu_caller_ip, follow_next_tnt
+            );
         } else if(packet.type == PSB) {
             in_psb = true;
         } else if(packet.type == PSBEND) {
             in_psb = false;
         } else if(packet.type == TNT && follow_next_tnt) {
-            follow_tnt_packet(packet, current_ip, qemu_return_ip, qemu_caller_ip, follow_next_tnt);
-        } else if(packet.type == MODE && use_asm) {
-            if(!in_psb) printf("MODE NOT IN PSB\n");
-            //advance_to_mode();
-        }
+            follow_tnt_packet(
+                packet, current_ip, qemu_return_ip, qemu_memory_offset
+                qemu_caller_ip, follow_next_tnt, call_stack
+            );
+        } 
     }
 }
 
 
-static inline void follow_tnt_packet(pt_packet packet, u64& current_ip, u64 qemu_return_ip, u64 qemu_caller_ip, bool& follow_next_tnt)
-{
+static inline void follow_tnt_packet(
+    pt_packet packet, u64& current_ip, u64 qemu_return_ip, 
+    u64 qemu_caller_ip, u64& qemu_memory_offset, bool& follow_next_tnt,
+    std::stack<u64>& call_stack
+) {
     u64 ip = current_ip;
-    jmp j;
+    jit_asm_instruction j;
     bool found_mapping;
 
     for(int i = 0; i < packet.tnt_data.size; i++) {
         // Get the next conditional jump
-        for(j = get_next_jmp(ip); !j.conditional; j = get_next_jmp(ip)) {
+        for(j = get_next_jit_instr(ip); j.type != JIT_JXX; j = get_next_jit_instr(ip)) {
             printf("  TU. JMP: %lX -> %lX\n", j.loc, j.des);
             ip = j.des;
             
@@ -175,8 +181,10 @@ static inline void follow_tnt_packet(pt_packet packet, u64& current_ip, u64 qemu
 }
 
 
-static inline void update_current_ip(u64& current_ip, u64& new_ip, u64 qemu_caller_ip, bool& found_mapping)
-{
+static inline void update_current_ip(
+    u64& current_ip, u64& new_ip, 
+    u64 qemu_caller_ip, bool& found_mapping
+) {
     current_ip = new_ip;
     u64 guest_ip = get_mapping(current_ip);
 

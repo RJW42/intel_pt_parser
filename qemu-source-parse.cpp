@@ -15,7 +15,7 @@
 #include <cstring>
 
 static std::map<u64, qemu_helper_function> qemu_functions;
-static std::map<u64, qemu_asm_instruction> qemu_instructions;
+static std::map<u64, src_asm_instruction> qemu_instructions;
 static std::unordered_map<std::string, u64> qemu_translated_functions;
 
 
@@ -48,6 +48,69 @@ void qemu_source_init(
         << std::endl << std::endl;
 }
 
+
+u64 get_call_loc(std::string func_name) 
+{
+    auto res = qemu_translated_functions.find(func_name);
+
+    if(res == qemu_translated_functions.end()){
+        std::cout 
+            << "ERROR: Function does not exist in qemu: " 
+            << func_name << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    return res->second;
+}
+
+
+std::string get_call_name(u64 loc)
+{
+    auto res = qemu_functions.find(loc);
+
+    if(res == qemu_functions.end()){
+        std::cout 
+            << "ERROR: No function in qemu for loc: " 
+            << loc << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    return *res->second.name;
+}
+
+
+src_asm_instruction get_next_src_instr(u64 current_ip)
+{
+    using namespace std;
+    auto low = qemu_instructions.lower_bound(current_ip);
+
+    if(low == qemu_instructions.end()) {
+        printf("Failed to find next instruction for: %lX\n", current_ip); 
+        exit(EXIT_FAILURE);
+    }
+
+    return low->second;
+}
+
+
+bool ip_inside_func(u64 ip)
+{
+    using namespace std;
+    auto low = qemu_functions.upper_bound(ip);
+
+    if(low == qemu_functions.begin()) {
+        return false;
+    }
+    low--;
+
+    if(!(ip < (low->first + low->second.size))) {
+        return false;
+    }
+
+    printf("    INSIDE: 0x%lX -> 0x%lX\n", ip, low->first);
+
+    return true;
+}
 
 
 
@@ -107,7 +170,7 @@ static void parse_helper_calls(
         func.size = 0;
         func.name = new std::string(helper);
 
-        qemu_asm_instruction instr(OTHER, 0);
+        src_asm_instruction instr(SRC_OTHER, 0);
 
         // Parse this helper function
         while(getline(qemu_file, line) && line.size() > 1) {
@@ -121,21 +184,22 @@ static void parse_helper_calls(
                 func.start = instr.loc;
                 std::cout << " start: " << std::hex << func.start << std::endl;
                 qemu_functions[func.start] = func;
+                translated_functions[*func.name] = func.start;
             }
 
             // Save this instruction if needed
-            if(instr.type != OTHER)
+            if(instr.type != SRC_OTHER)
                 qemu_instructions[instr.loc] = instr;
 
             // Print debug information
             switch(instr.type){
-            case CALL:
+            case SRC_CALL:
                 std::cout << "  call: ";
                 goto print_loc;
-            case JXX:
+            case SRC_JXX:
                 std::cout << "  jxx: ";
                 goto print_loc;
-            case JMP:
+            case SRC_JMP:
                 std::cout << "  jmp: ";
             print_loc:
                 std::cout 
@@ -143,10 +207,10 @@ static void parse_helper_calls(
                     << (instr.des ? (to_hex(*instr.des)) : "computed" )
                     << std::endl;                           
                 break;
-            case RET:
+            case SRC_RET:
                 std::cout << "  return" << std::endl;
                 break;
-            case OTHER:
+            case SRC_OTHER:
                 break;
             }
         }
@@ -159,7 +223,7 @@ static void parse_helper_calls(
 }
 
 
-static qemu_asm_instruction parse_line(
+static src_asm_instruction parse_line(
     std::string line, std::unordered_set<std::string>& functions_to_translate,
     std::unordered_map<std::string, u64>& translated_functions
 ) {
@@ -169,10 +233,10 @@ static qemu_asm_instruction parse_line(
     auto instr_adr = stoul(adr_string, NULL, 16);
 
     // Get instruction type
-    qemu_asm_type type = parse_line_type(line);
+    src_asm_type type = parse_line_type(line);
 
-    if(type == OTHER || type == RET) {
-        return qemu_asm_instruction(type, instr_adr);
+    if(type == SRC_OTHER || type == SRC_RET) {
+        return src_asm_instruction(type, instr_adr);
     }
 
     // Check if this jump / call is a computed jump / call
@@ -184,14 +248,14 @@ static qemu_asm_instruction parse_line(
 
     if(!is_hex(des_string)) {
         // Jump / call is computed cannot determine desitination
-        return qemu_asm_instruction(type, instr_adr, std::nullopt);
+        return src_asm_instruction(type, instr_adr, std::nullopt);
     }
 
     // Not computed, can determine return address
     auto jmp_des = stoul(des_string, NULL, 16);
 
-    if(type == JMP || type == JXX) {
-        return qemu_asm_instruction(type, instr_adr, { jmp_des } );
+    if(type == SRC_JMP || type == SRC_JXX) {
+        return src_asm_instruction(type, instr_adr, { jmp_des } );
     }
 
     // Determine the name of the function being called
@@ -206,33 +270,33 @@ static qemu_asm_instruction parse_line(
         functions_to_translate.insert(call_name);
     }
 
-    return qemu_asm_instruction(type, instr_adr, { jmp_des });
+    return src_asm_instruction(type, instr_adr, { jmp_des });
 }
 
 
-static qemu_asm_type parse_line_type(std::string line)
+static src_asm_type parse_line_type(std::string line)
 {
     // Check for empty line
-    if(line.size() < 32) return OTHER;
+    if(line.size() < 32) return SRC_OTHER;
 
     // Get the type string
     line = line.erase(0, 32);
     line = line.substr(0, line.find(" "));
 
     if(line.starts_with("call")) {
-        return CALL;
+        return SRC_CALL;
     }
     if(line.starts_with("ret")) {
-        return RET;
+        return SRC_RET;
     }
     if(line.starts_with("jmp")) {
-        return JMP;
+        return SRC_JMP;
     }
     if(line.starts_with("j")) {
-        return JXX;
+        return SRC_JXX;
     }
 
-    return OTHER;
+    return SRC_OTHER;
 }
 
 

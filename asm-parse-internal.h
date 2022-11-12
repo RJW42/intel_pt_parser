@@ -12,6 +12,7 @@ typedef enum trace_type {
     BLOCK,
     JXX,
     JXX_LDST,
+    CALL,
     JMP,
     LABEL,
     UPDATE,
@@ -51,12 +52,18 @@ typedef struct trace_element {
             u64 new_des;
         } update;
 
+        struct { /* Call */
+            u64 loc;
+            u64 qemu_des;
+        } call;
+
         u64 block_size; /* Block Size */
         
-    } data;
+    };
 } trace_element;
 
 
+static bool parse_trace_element(std::string& line, trace_element& out);
 static bool parse_block(std::string& line, trace_element& out);
 static bool parse_block_size(std::string& line, trace_element& out);
 static bool parse_jmp(std::string& line, trace_element& out);
@@ -66,5 +73,8 @@ static bool parse_label(std::string& line, trace_element& out);
 static bool parse_ipt_start(std::string& line, trace_element& out);
 static bool parse_ipt_stop(std::string& line, trace_element& out);
 static bool parse_jxx_ldst(std::string& line, trace_element& out);
+static bool parse_call(std::string& line, trace_element& out);
+
+static void print_trace_element(trace_element& elmnt);
 
 #endif

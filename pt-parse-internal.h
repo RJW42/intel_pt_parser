@@ -7,14 +7,25 @@
 
 #include <vector>
 #include <optional>
+#include <stack>
 
 static unsigned long get_mapping(unsigned long host_pc);
 
 static void log_basic_block(unsigned long id);
 
-static void print_packet_debug(pt_packet packet, u64& pad_count);
-static void update_current_ip(u64& current_ip, u64& new_ip, u64 qemu_caller_ip, bool& found_mapping);
-static void follow_tnt_packet(pt_packet packet, u64& current_ip, u64 qemu_return_ip, u64 qemu_caller_ip, bool& follow_next_tnt);
+static void print_packet_debug(
+    pt_packet packet, u64& pad_count
+);
+static void update_current_ip(
+    u64& current_ip, u64& new_ip, 
+    u64 qemu_caller_ip, bool& found_mapping
+);
+static void follow_tnt_packet(
+    pt_packet packet, u64& current_ip, 
+    u64 qemu_return_ip, u64 qemu_caller_ip, 
+    u64& qemu_memory_offset, bool& follow_next_tnt,
+    std::stack<u64>& call_stack
+);
 
 static void load_output_file(char *file_name);
 static void load_trace_file(char *file_name);
