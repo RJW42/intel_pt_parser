@@ -16,15 +16,31 @@ static void log_basic_block(unsigned long id);
 static void print_packet_debug(
     pt_packet packet, u64& pad_count
 );
+
 static void update_current_ip(
     u64& current_ip, u64& new_ip, 
-    u64 qemu_caller_ip, bool& found_mapping
+    u64 qemu_caller_ip, u64 qemu_memory_offset,
+    bool& found_mapping, bool& tracing_qemu_code
 );
-static void follow_tnt_packet(
-    pt_packet packet, u64& current_ip, 
+
+static void follow_asm(
+    std::optional<tnt_packet_data> tnt_packet, u64& current_ip, 
     u64 qemu_return_ip, u64 qemu_caller_ip, 
-    u64& qemu_memory_offset, bool& follow_next_tnt,
-    std::stack<u64>& call_stack
+    u64 qemu_memory_offset, u64& qemu_call_adr, 
+    bool& next_tip_is_qemu_call, std::stack<u64>& call_stack, 
+    bool& tracing_qemu_code, bool& tracing_jit_code
+);
+
+static std::optional<pt_instruction> get_next_instr(
+    u64 current_ip, u64 qemu_memory_offset, bool tracing_qemu_code
+);
+
+static inline pt_instruction_type jit_to_pt_instr_type(
+    jit_asm_type type
+);
+
+static inline pt_instruction_type src_to_pt_instr_type(
+    src_asm_instruction type
 );
 
 static void load_output_file(char *file_name);

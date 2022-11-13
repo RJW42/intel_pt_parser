@@ -58,7 +58,7 @@ bool ip_inside_block(u64 ip)
         return false;
     }
 
-    printf("    INSIDE: 0x%lX -> 0x%lX\n", ip, low->first);
+    printf("    INSIDE JIT: 0x%lX -> 0x%lX\n", ip, low->first);
 
     return true;
 }
@@ -129,10 +129,10 @@ void advance_to_mode(void)
             ));
             break;
         case UPDATE: // Update jmp
-            instructions.emplace(curr.update.loc, jit_asm_instruction(
+            instructions[curr.update.loc] = jit_asm_instruction(
                 instructions.find(curr.update.loc)->second.type,
                 curr.update.loc, curr.update.new_des
-            ));
+            );
             break;
         case LABEL: {// Use this label to update any jxx insutrctions
             if(unset_jxx.find(curr.label.id) == unset_jxx.end()) {

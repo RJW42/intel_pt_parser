@@ -18,6 +18,7 @@ static std::map<u64, qemu_helper_function> qemu_functions;
 static std::map<u64, src_asm_instruction> qemu_instructions;
 static std::unordered_map<std::string, u64> qemu_translated_functions;
 
+static const char* source_file;
 
 void qemu_source_init(
     const char* qemu_source_file_name, 
@@ -25,6 +26,8 @@ void qemu_source_init(
 ) {
     // Keep track of all helper functions called by the guest program
     std::unordered_set<std::string> helpers_to_translate;
+
+    source_file = qemu_source_file_name;
 
     search_for_helper_calls(
         translated_source_file_name, 
@@ -51,6 +54,7 @@ void qemu_source_init(
 
 u64 get_call_loc(std::string func_name) 
 {
+    // init_function(func_name);
     auto res = qemu_translated_functions.find(func_name);
 
     if(res == qemu_translated_functions.end()){
@@ -66,6 +70,7 @@ u64 get_call_loc(std::string func_name)
 
 std::string get_call_name(u64 loc)
 {
+    // init_loc(loc);
     auto res = qemu_functions.find(loc);
 
     if(res == qemu_functions.end()){
@@ -85,7 +90,7 @@ src_asm_instruction get_next_src_instr(u64 current_ip)
     auto low = qemu_instructions.lower_bound(current_ip);
 
     if(low == qemu_instructions.end()) {
-        printf("Failed to find next instruction for: %lX\n", current_ip); 
+        printf("Failed to find next instruction for: 0x%lX\n", current_ip); 
         exit(EXIT_FAILURE);
     }
 
@@ -96,6 +101,12 @@ src_asm_instruction get_next_src_instr(u64 current_ip)
 bool ip_inside_func(u64 ip)
 {
     using namespace std;
+    auto func = qemu_functions.find(ip);
+    if(func != qemu_functions.end()) {
+        printf("    INSIDE SRC: 0x%lX -> 0x%lX\n", ip, func->first);
+        return true;
+    }
+
     auto low = qemu_functions.upper_bound(ip);
 
     if(low == qemu_functions.begin()) {
@@ -107,7 +118,7 @@ bool ip_inside_func(u64 ip)
         return false;
     }
 
-    printf("    INSIDE: 0x%lX -> 0x%lX\n", ip, low->first);
+    printf("    INSIDE SRC: 0x%lX -> 0x%lX\n", ip, low->first);
 
     return true;
 }
@@ -115,6 +126,33 @@ bool ip_inside_func(u64 ip)
 
 
 // Inital Parsing
+static void init_function(std::string func_name) {
+    // Check if the function has already been translated
+    auto res = qemu_translated_functions.find(func_name);
+
+    if(res != qemu_translated_functions.end()) return;
+
+    // Hasn't been translated translate this function
+    std::unordered_set<std::string> helpers_to_translate;
+
+    helpers_to_translate.emplace(func_name);
+
+    parse_helper_calls(
+        source_file, helpers_to_translate,
+        qemu_translated_functions
+    );
+}
+
+
+static void init_loc(u64 loc) {
+    // Check if this location has already  been translated 
+    if(ip_inside_func(loc)) return;
+
+    find_and_parse_jump_region(
+        source_file, loc, qemu_translated_functions
+    );
+}
+
 
 static void search_for_helper_calls(
     const char* translated_source_file_name, 
@@ -135,7 +173,6 @@ static void search_for_helper_calls(
         helpers_to_translate.insert("helper_" + line);
     }
 }
-
 
 
 static void parse_helper_calls(
@@ -182,7 +219,7 @@ static void parse_helper_calls(
             if(func.start == 0) {
                 // Set the function start point and save it
                 func.start = instr.loc;
-                std::cout << " start: " << std::hex << func.start << std::endl;
+                std::cout << " start: 0x" << std::hex << func.start << std::endl;
                 qemu_functions[func.start] = func;
                 translated_functions[*func.name] = func.start;
             }
@@ -197,18 +234,21 @@ static void parse_helper_calls(
                 std::cout << "  call: ";
                 goto print_loc;
             case SRC_JXX:
-                std::cout << "  jxx: ";
+                std::cout << "  jxx:  ";
                 goto print_loc;
             case SRC_JMP:
-                std::cout << "  jmp: ";
+                std::cout << "  jmp:  ";
             print_loc:
                 std::cout 
-                    << instr.loc << " -> " 
-                    << (instr.des ? (to_hex(*instr.des)) : "computed" )
+                    << "0x" << to_hex(instr.loc) << " -> " 
+                    << (instr.des ? 
+                        ("0x" + to_hex(*instr.des)) : "computed" )
                     << std::endl;                           
                 break;
             case SRC_RET:
-                std::cout << "  return" << std::endl;
+                std::cout 
+                    << "  return: " << to_hex(*instr.des) 
+                    << " -> _" << std::endl;
                 break;
             case SRC_OTHER:
                 break;

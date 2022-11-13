@@ -100,4 +100,25 @@ struct pt_packet {
 };
 
 
+
+enum pt_instruction_type {
+    PT_JMP,
+    PT_JXX,
+    PT_RET,
+    PT_CALL
+};
+
+
+struct pt_instruction {
+    pt_instruction_type type;
+    bool is_qemu_src;
+    u64 loc;
+    u64 des; /* des of jump / call, empty for ret*/
+
+
+    pt_instruction(
+        pt_instruction_type type, bool is_qemu_src, u64 loc, u64 des
+    ) : type(type), is_qemu_src(is_qemu_src), loc(loc), des(des) {};
+};
+
 #endif
