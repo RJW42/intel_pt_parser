@@ -47,6 +47,13 @@ jit_asm_instruction get_next_jit_instr(u64 current_ip)
 bool ip_inside_block(u64 ip) 
 {
     using namespace std;
+    auto block = block_sizes.find(ip);
+
+    if(block != block_sizes.end()) { 
+        printf("    INSIDE JIT: 0x%lX -> 0x%lX\n", ip, block->first);
+        return true;
+    }
+
     auto low = block_sizes.upper_bound(ip);
 
     if(low == block_sizes.begin()) {

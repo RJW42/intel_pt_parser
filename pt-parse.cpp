@@ -128,8 +128,10 @@ void parse(void)
             update_current_ip(
                 current_ip, packet.tip_data.ip, 
                 qemu_caller_ip, qemu_memory_offset,
-                follow_next_tnt, tracing_qemu_code
+                tracing_qemu_code, tracing_jit_code
             );
+
+            next_tip_is_qemu_call = false;
         } else if(packet.type == TNT) {
             tnt_packet = { packet.tnt_data };
         } 
@@ -138,7 +140,8 @@ void parse(void)
         follow_asm(
             tnt_packet, current_ip, qemu_return_ip,
             qemu_caller_ip, qemu_memory_offset, qemu_call_adr,
-            next_tip_is_qemu_call, call_stack, tracing_qemu_code
+            next_tip_is_qemu_call, call_stack, tracing_qemu_code,
+            tracing_jit_code
         );
     }
 }
@@ -154,60 +157,55 @@ static inline void follow_asm(
     // Follow instructions until either
     //      1. A condtional jmp without a corispdongin tnt is reached
     //      2. A computed jmp is reached 
-    if(!tracing_qemu_code && !tracing_jit_code) return;
+    if((!tracing_qemu_code && !tracing_jit_code)) return;
 
+    // Keep track of the position in tnt packet 
+    u32 tnt_packet_p = 0;
 
-}
+    bool reached_unbindined_jmp = false;
 
+    std::optional<pt_instruction> maybe_instr;
 
-static inline void follow_tnt_packet(
-    pt_packet packet, u64& current_ip, u64 qemu_return_ip, 
-    u64 qemu_caller_ip, u64 qemu_memory_offset, u64& qemu_call_adr, 
-    bool& follow_next_tnt, bool& next_tip_is_qemu_call, std::stack<u64>& call_stack,
-    bool& tracing_qemu_code
-) {
-    tnt_packet_data tnt_packet = packet.tnt_data;
-    int tnt_packet_p = 0;
-    bool found_mapping;
-
-    while(tnt_packet_p < tnt_packet.size) {
-        // Follow the next instruction
-        auto instr_maybe = get_next_instr(
-            current_ip, qemu_memory_offset, tracing_qemu_code
-        );
-
-        if(!instr_maybe) {
-            std::cout << "ERROR Could not get next insutrction" << std::endl;
-            exit(EXIT_FAILURE);
-        };
-
-        auto instr = *instr_maybe;
-
+    while(
+        !reached_unbindined_jmp && (
+            maybe_instr = get_next_instr(
+                current_ip, qemu_memory_offset,
+                tracing_qemu_code, tracing_jit_code
+            ))
+    ) {
         u64 offset = (tracing_qemu_code ? qemu_memory_offset : 0);
+        auto instr = *maybe_instr;
 
         switch (instr.type) {
-        case PT_JMP: { // Make direct jump
+        case PT_JMP: { // Follow this jump
             u64 l = instr.loc + offset;
             u64 d = instr.des + offset;
             printf("  TU. JMP: 0x%lX -> 0x%lX\n", l, d);
 
             if(d == qemu_return_ip) {
                 printf("    JMP out of bounds\n");
-                follow_next_tnt = false;
+                tracing_qemu_code = false;
+                tracing_jit_code = false;
                 return;
             }
 
             update_current_ip(
                 current_ip, d, qemu_caller_ip, 
-                qemu_memory_offset, found_mapping, 
-                tracing_qemu_code
+                qemu_memory_offset, tracing_qemu_code, 
+                tracing_jit_code
             );
             break;
-        } case PT_JXX: { // Handle conditional jump
+        } case PT_JXX: { // Handle this conditional jump
+            // Check if there is a tnt bit for this jump
+            if(!tnt_packet || tnt_packet_p >= (*tnt_packet).size) {
+                reached_unbindined_jmp = true;
+                break;
+            }
+
             u64 l = instr.loc + offset;
             u64 d = instr.des + offset;
 
-            if(!tnt_packet.tnt[tnt_packet_p++]) {
+            if(!(*tnt_packet).tnt[tnt_packet_p++]) {
                 // Conditional jump is not taken
                 printf("  NT. JMP: 0x%lX -> 0x%lX\n", l, d);
                 current_ip = l + 1;
@@ -217,19 +215,32 @@ static inline void follow_tnt_packet(
             // Conditional jump is taken
             printf("  TC. JMP: 0x%lX -> 0x%lX\n", l, d);
 
-            if(d == qemu_return_ip) {
+             if(d == qemu_return_ip) {
                 printf("    JMP out of bounds\n");
-                follow_next_tnt = false;
+                tracing_jit_code = false;
+                tracing_qemu_code = false;
                 return;
             }
 
             update_current_ip(
                 current_ip, d, qemu_caller_ip, 
-                qemu_memory_offset, found_mapping, 
-                tracing_qemu_code
+                qemu_memory_offset, tracing_qemu_code, 
+                tracing_jit_code
             );
             break;
-        } case PT_RET: { // Handle return jump
+        } case PT_RET: { // Handle this return 
+            // Check if there is a tnt bit for this return
+            if(!tnt_packet || tnt_packet_p >= (*tnt_packet).size) {
+                reached_unbindined_jmp = true;
+                break;
+            }
+
+            if(!(*tnt_packet).tnt[tnt_packet_p++]) {
+                // Conditional jump is not taken
+                printf("  ERROR: Reached return but it is marked as not taken\n");
+                exit(EXIT_FAILURE);
+            }
+
             u64 l = instr.loc + offset;
             u64 d = call_stack.top();
             call_stack.pop();
@@ -244,13 +255,17 @@ static inline void follow_tnt_packet(
 
             update_current_ip(
                 current_ip, d, qemu_caller_ip, 
-                qemu_memory_offset, found_mapping, 
-                tracing_qemu_code
+                qemu_memory_offset, tracing_qemu_code, 
+                tracing_jit_code
             );
             break;
-        } case PT_CALL: { // Handle call
+        } case PT_CALL: { // Handle this call
             u64 l = instr.loc + offset;
             u64 d = instr.des + offset;
+
+            if(!tracing_qemu_code) {
+                d = instr.des + qemu_memory_offset;
+            }
 
             printf("  CALL: 0x%lX -> 0x%lX\n", l, d);
 
@@ -260,80 +275,40 @@ static inline void follow_tnt_packet(
             // Save return address
             call_stack.push(l + 1);
 
-            if(qemu_memory_offset == 0)
+            if(qemu_memory_offset == 0) {
                 qemu_call_adr = instr.des;
-
-            update_current_ip(
-                current_ip, d, qemu_caller_ip, 
-                qemu_memory_offset, found_mapping, 
-                tracing_qemu_code
-            );
-            return;
-        } }
-    }
-
-    // The TNT packet has been handled. Take all remaning un-conditional jumps
-    while(true) {
-        auto instr_maybe = get_next_instr(
-            current_ip, qemu_memory_offset, tracing_qemu_code
-        );
-
-        if(!instr_maybe) return;
-
-        auto instr = *instr_maybe;
-
-        u64 offset = (tracing_qemu_code ? qemu_memory_offset : 0);
-
-        switch (instr.type) {
-        case PT_JMP: { // Make direct jump
-            u64 l = instr.loc + offset;
-            u64 d = instr.des + offset;
-            printf("  TU.2 JMP: 0x%lX -> 0x%lX\n", l, d);
-
-            if(d == qemu_return_ip) {
-                printf("    JMP out of bounds\n");
-                follow_next_tnt = false;
-                return;
+                reached_unbindined_jmp = true;
+                break;
             }
 
             update_current_ip(
                 current_ip, d, qemu_caller_ip, 
-                qemu_memory_offset, found_mapping, 
-                tracing_qemu_code
+                qemu_memory_offset, tracing_qemu_code, 
+                tracing_jit_code
             );
-            break;
-        } case PT_CALL: { // Handle call
-            u64 l = instr.loc + offset;
-            u64 d = instr.des + offset;
 
-            printf("  CALL.2: 0x%lX -> 0x%lX\n", l, d);
-
-            tracing_qemu_code = true;
-            next_tip_is_qemu_call = true;
-
-            // Save return address
-            call_stack.push(l + 1);
-
-            if(qemu_memory_offset == 0)
-                qemu_call_adr = instr.des;
-
-            update_current_ip(
-                current_ip, d, qemu_caller_ip, 
-                qemu_memory_offset, found_mapping, 
-                tracing_qemu_code
-            );
-            return;
-        } case PT_JXX: // For conditional jumps we must wait for next tnt 
-          case PT_RET: return;
+            // if(qemu_memory_offset == 0) {
+            //     // Need to stop as a qemu call found
+            //     // Todo: maybe want to add a check this is okay 
+            //     reached_unbindined_jmp = true;
+            // }
+        }
         }
     }
+
+    // Check that there is nothing left in the tnt packet ? 
 }
 
 
+
 static inline std::optional<pt_instruction> get_next_instr(
-    u64 current_ip, u64 qemu_memory_offset, bool tracing_qemu_code
+    u64 current_ip, u64 qemu_memory_offset, 
+    bool tracing_qemu_code, bool tracing_jit_code
 ) {
-    if(!tracing_qemu_code) {
+    // Todo: Maybe add an option to check the next instruction
+    //       is not outside of the current block 
+    if(!tracing_jit_code && !tracing_qemu_code) return std::nullopt;
+    if(tracing_jit_code) {
         // Simple case jit instruction
         auto instr = get_next_jit_instr(current_ip);
 
@@ -346,10 +321,12 @@ static inline std::optional<pt_instruction> get_next_instr(
     // Slightly more complex case of a qemu instruction
     if(qemu_memory_offset == 0) {
         std::cout 
-            << "ERROR: Cannot get qemu instruction "
+            << "    WARNING: Cannot get qemu instruction "
             <<  "if memeory offset is not set" << std::endl;
-        exit(EXIT_FAILURE);
+        return std::nullopt;
     }
+
+    printf("  Searching: 0x%lX\n", current_ip - qemu_memory_offset);
 
     auto instr = get_next_src_instr(current_ip - qemu_memory_offset);
 
@@ -399,9 +376,9 @@ static inline pt_instruction_type src_to_pt_instr_type(
 
 
 static inline void update_current_ip(
-    u64& current_ip, u64& new_ip, 
+    u64& current_ip, u64 new_ip, 
     u64 qemu_caller_ip, u64 qemu_memory_offset, 
-    bool& found_mapping, bool& tracing_qemu_code
+    bool& tracing_qemu_code, bool& tracing_jit_code
 ) {
     current_ip = new_ip;
     u64 guest_ip = get_mapping(current_ip);
@@ -410,24 +387,26 @@ static inline void update_current_ip(
         advance_to_mode();
     }
 
-    
-    if(guest_ip == 0) {
-        found_mapping = ip_inside_block(current_ip);
-        if(found_mapping) { 
-            tracing_qemu_code = false;
-        } else {
-            found_mapping = ip_inside_func(current_ip - qemu_memory_offset);
-        }
-        return;
-    } 
-    
-    tracing_qemu_code = false;
-    log_basic_block(guest_ip);
-    found_mapping = true;
+    if(ip_inside_block(current_ip)) {
+        // Check if this new ip is in the jit codebase 
+        tracing_jit_code = true;
+        tracing_qemu_code = false;
+    } else if (ip_inside_func(current_ip - qemu_memory_offset)){
+        // Check if this new ip is in the qemu codebase 
+        tracing_jit_code = false;
+        tracing_qemu_code = true;
+    } else {
+        // This ip is not in anything
+        tracing_jit_code = false;
+        tracing_qemu_code = false;
+    }
 
+    if(guest_ip != 0) { 
+        log_basic_block(guest_ip);
 #ifdef DEBUG_MODE_
-    printf("    Host IP: 0x%lX -> Guest IP: 0x%lX\n", current_ip, guest_ip);
+        printf("    Host IP: 0x%lX -> Guest IP: 0x%lX\n", current_ip, guest_ip);
 #endif
+    }
 }
 
 

@@ -18,9 +18,9 @@ static void print_packet_debug(
 );
 
 static void update_current_ip(
-    u64& current_ip, u64& new_ip, 
+    u64& current_ip, u64 new_ip, 
     u64 qemu_caller_ip, u64 qemu_memory_offset,
-    bool& found_mapping, bool& tracing_qemu_code
+    bool& tracing_qemu_code, bool& tracing_jit_code
 );
 
 static void follow_asm(
@@ -32,7 +32,8 @@ static void follow_asm(
 );
 
 static std::optional<pt_instruction> get_next_instr(
-    u64 current_ip, u64 qemu_memory_offset, bool tracing_qemu_code
+    u64 current_ip, u64 qemu_memory_offset, 
+    bool tracing_qemu_code, bool tracing_jit_code
 );
 
 static inline pt_instruction_type jit_to_pt_instr_type(
