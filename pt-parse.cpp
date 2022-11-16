@@ -107,6 +107,9 @@ void parse(void)
     bool tracing_qemu_code = false;
     bool tracing_jit_code = false;
 
+    bool in_psb = false;
+    bool in_fup = false;
+
     std::stack<u64> call_stack;
 
 
@@ -119,30 +122,58 @@ void parse(void)
 
         // Handle This Packet
         if(packet.type == TIP) {
+            // Set Qemu Offset if needed 
             if(next_tip_is_qemu_call && qemu_memory_offset == 0) {;
                 qemu_memory_offset = packet.tip_data.ip - qemu_call_adr;
                 printf("    QEMU src offset: -0x%lX\n", qemu_memory_offset);
             }
 
             // Update Current IP
-            update_current_ip(
-                current_ip, packet.tip_data.ip, 
-                qemu_caller_ip, qemu_memory_offset,
-                tracing_qemu_code, tracing_jit_code
-            );
+            if(packet.tip_data.type == TIP_FUP) {
+                in_fup = true;
+            } 
+
+            // If FUP and in PSB
+            //  good
+            // If FUP don't update wait IP for next TIP
+            //  If the next tip ip is not the same as the current
+            //  then we should update. Else it is not new info 
+            // Else 
+            //  good 
+
+            if(!(in_fup && !in_psb) || 
+                (in_fup && packet.tip_data.type != TIP_FUP &&
+                 packet.tip_data.ip != current_ip
+                )
+            ) {
+                // Can Update Ip 
+                in_fup = false;
+
+                update_current_ip(
+                    current_ip, packet.tip_data.ip, 
+                    qemu_caller_ip, qemu_memory_offset,
+                    tracing_qemu_code, tracing_jit_code,
+                    in_psb
+                );
+            } 
 
             next_tip_is_qemu_call = false;
-        } else if(packet.type == TNT) {
+        } else if(packet.type == PSB){
+            in_psb = true;
+        } else if(packet.type == PSBEND){
+            in_psb = false;
+        }else if(packet.type == TNT) {
             tnt_packet = { packet.tnt_data };
         } 
 
         // Follow all asm we can
-        follow_asm(
-            tnt_packet, current_ip, qemu_return_ip,
-            qemu_caller_ip, qemu_memory_offset, qemu_call_adr,
-            next_tip_is_qemu_call, call_stack, tracing_qemu_code,
-            tracing_jit_code
-        );
+        if(packet.type == TNT || packet.type == TIP)
+            follow_asm(
+                tnt_packet, current_ip, qemu_return_ip,
+                qemu_caller_ip, qemu_memory_offset, qemu_call_adr,
+                next_tip_is_qemu_call, call_stack, tracing_qemu_code,
+                tracing_jit_code
+            );
     }
 }
 
@@ -180,7 +211,7 @@ static inline void follow_asm(
         case PT_JMP: { // Follow this jump
             u64 l = instr.loc + offset;
             u64 d = instr.des + offset;
-            printf("  TU. JMP: 0x%lX -> 0x%lX\n", l, d);
+            printf("  TU. JMP: 0x%lX -> 0x%lX\n", l - offset, d - offset); 
 
             if(d == qemu_return_ip) {
                 printf("    JMP out of bounds\n");
@@ -207,13 +238,13 @@ static inline void follow_asm(
 
             if(!(*tnt_packet).tnt[tnt_packet_p++]) {
                 // Conditional jump is not taken
-                printf("  NT. JMP: 0x%lX -> 0x%lX\n", l, d);
+                printf("  NT. JMP: 0x%lX -> 0x%lX\n", l - offset, d - offset);
                 current_ip = l + 1;
                 break;
             }
 
             // Conditional jump is taken
-            printf("  TC. JMP: 0x%lX -> 0x%lX\n", l, d);
+            printf("  TC. JMP: 0x%lX -> 0x%lX\n", l - offset, d - offset);
 
              if(d == qemu_return_ip) {
                 printf("    JMP out of bounds\n");
@@ -237,15 +268,17 @@ static inline void follow_asm(
 
             if(!(*tnt_packet).tnt[tnt_packet_p++]) {
                 // Conditional jump is not taken
-                printf("  ERROR: Reached return but it is marked as not taken\n");
-                exit(EXIT_FAILURE);
+                printf("  WARNING: Reached return but it is marked as not taken\n");
+                //exit(EXIT_FAILURE);
+                reached_unbindined_jmp = true;
+                break;
             }
 
             u64 l = instr.loc + offset;
             u64 d = call_stack.top();
             call_stack.pop();
 
-            printf("  RET: 0x%lX -> 0x%lX\n", l, d);
+            printf("  RET: 0x%lX -> 0x%lX\n", l - offset, d - offset);
 
             // Check if returning back into jitted code
             if(call_stack.size() == 0) {
@@ -267,7 +300,7 @@ static inline void follow_asm(
                 d = instr.des + qemu_memory_offset;
             }
 
-            printf("  CALL: 0x%lX -> 0x%lX\n", l, d);
+            printf("  CALL: 0x%lX -> 0x%lX\n", l - offset, d - offset);
 
             tracing_qemu_code = true;
             next_tip_is_qemu_call = true;
@@ -287,11 +320,10 @@ static inline void follow_asm(
                 tracing_jit_code
             );
 
-            // if(qemu_memory_offset == 0) {
-            //     // Need to stop as a qemu call found
-            //     // Todo: maybe want to add a check this is okay 
-            //     reached_unbindined_jmp = true;
-            // }
+            if(!tnt_packet || tnt_packet_p >= (*tnt_packet).size) {
+                reached_unbindined_jmp = true;
+                break;
+            }
         }
         }
     }
@@ -325,8 +357,6 @@ static inline std::optional<pt_instruction> get_next_instr(
             <<  "if memeory offset is not set" << std::endl;
         return std::nullopt;
     }
-
-    printf("  Searching: 0x%lX\n", current_ip - qemu_memory_offset);
 
     auto instr = get_next_src_instr(current_ip - qemu_memory_offset);
 
@@ -378,7 +408,8 @@ static inline pt_instruction_type src_to_pt_instr_type(
 static inline void update_current_ip(
     u64& current_ip, u64 new_ip, 
     u64 qemu_caller_ip, u64 qemu_memory_offset, 
-    bool& tracing_qemu_code, bool& tracing_jit_code
+    bool& tracing_qemu_code, bool& tracing_jit_code,
+    bool in_psb
 ) {
     current_ip = new_ip;
     u64 guest_ip = get_mapping(current_ip);
@@ -397,11 +428,14 @@ static inline void update_current_ip(
         tracing_qemu_code = true;
     } else {
         // This ip is not in anything
+        // printf("    IP 0x%lX does not exist in any function\n", 
+        //     current_ip - (tracing_qemu_code ? qemu_memory_offset : 0)
+        // );
         tracing_jit_code = false;
         tracing_qemu_code = false;
     }
 
-    if(guest_ip != 0) { 
+    if(guest_ip != 0 && !in_psb) { 
         log_basic_block(guest_ip);
 #ifdef DEBUG_MODE_
         printf("    Host IP: 0x%lX -> Guest IP: 0x%lX\n", current_ip, guest_ip);

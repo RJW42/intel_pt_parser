@@ -20,7 +20,8 @@ static void print_packet_debug(
 static void update_current_ip(
     u64& current_ip, u64 new_ip, 
     u64 qemu_caller_ip, u64 qemu_memory_offset,
-    bool& tracing_qemu_code, bool& tracing_jit_code
+    bool& tracing_qemu_code, bool& tracing_jit_code,
+    bool in_psb = false
 );
 
 static void follow_asm(

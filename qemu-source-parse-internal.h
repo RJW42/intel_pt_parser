@@ -41,6 +41,8 @@ static src_asm_instruction parse_line(
 
 static src_asm_type parse_line_type(std::string line);
 
+static void print_qemu_instruction(const src_asm_instruction& instr);
+
 
 static std::optional<qemu_helper_function> get_corisponding_func(u64 loc);
 

@@ -29,10 +29,10 @@ void qemu_source_init(
 
     source_file = qemu_source_file_name;
 
-    search_for_helper_calls(
-        translated_source_file_name, 
-        helpers_to_translate
-    );
+    // search_for_helper_calls(
+    //     translated_source_file_name, 
+    //     helpers_to_translate
+    // );
 
     // Parse all helper functions
     auto& translated_functions = qemu_translated_functions;
@@ -180,24 +180,27 @@ static void parse_helper_calls(
     std::unordered_set<std::string>& functions_to_translate,
     std::unordered_map<std::string, u64>& translated_functions
 ) {
-    while(functions_to_translate.size() > 0) {
-        // Get function name
-        auto helper = *functions_to_translate.begin();
-        functions_to_translate.erase(helper);
+    auto qemu_file = std::ifstream(qemu_source_file_name);
+    std::string line;
 
-        // Find this function in qemu source
-        auto qemu_file = std::ifstream(qemu_source_file_name);
-        std::string line;
+    while(getline(qemu_file, line)) {
+        // Find the next qemu function
+        std::string helper;
         bool found = false;
-        std::string name = " <" + helper + ">:";
 
-        while(!found && getline(qemu_file, line))
-            found = ends_with(line, name);
+        do { 
+            if(line.size() < 10 || line[0] != '0') continue;
+            if(line.find("<") == std::string::npos || line.find(">") == std::string::npos) continue;
+
+            helper = line.substr(line.find("<") + 1);
+            helper = helper.substr(0, helper.find(">"));
+
+            found = true;
+        } while(!found && getline(qemu_file, line));
 
         if(!found) {
-            std::cout << "Failed to find function in qemu source: " 
-                      << helper << std::endl;
-            exit(EXIT_FAILURE);
+            // Parsed all functions
+            return;
         }   
 
         std::cout << "QEMU FUNC: " << helper;
@@ -220,8 +223,6 @@ static void parse_helper_calls(
                 // Set the function start point and save it
                 func.start = instr.loc;
                 std::cout << " start: 0x" << std::hex << func.start << std::endl;
-                qemu_functions[func.start] = func;
-                translated_functions[*func.name] = func.start;
             }
 
             // Save this instruction if needed
@@ -229,34 +230,13 @@ static void parse_helper_calls(
                 qemu_instructions[instr.loc] = instr;
 
             // Print debug information
-            switch(instr.type){
-            case SRC_CALL:
-                std::cout << "  call: ";
-                goto print_loc;
-            case SRC_JXX:
-                std::cout << "  jxx:  ";
-                goto print_loc;
-            case SRC_JMP:
-                std::cout << "  jmp:  ";
-            print_loc:
-                std::cout 
-                    << "0x" << to_hex(instr.loc) << " -> " 
-                    << (instr.des ? 
-                        ("0x" + to_hex(*instr.des)) : "computed" )
-                    << std::endl;                           
-                break;
-            case SRC_RET:
-                std::cout 
-                    << "  return: " << to_hex(*instr.des) 
-                    << " -> _" << std::endl;
-                break;
-            case SRC_OTHER:
-                break;
-            }
+            print_qemu_instruction(instr);   
         }
 
         // Set function size
         func.size = instr.loc - func.start + 1;
+        qemu_functions[func.start] = func;
+        translated_functions[*func.name] = func.start;
 
         std::cout << "END size: " << std::to_string(func.size) << std::endl << std::endl;
     }
@@ -434,6 +414,35 @@ static std::string to_hex(u64 num)
     std::ostringstream ss;
     ss << std::hex << num;
     return ss.str();
+}
+
+
+static void print_qemu_instruction(const src_asm_instruction& instr)
+{
+    switch(instr.type){
+    case SRC_CALL:
+        std::cout << "  call: ";
+        goto print_loc;
+    case SRC_JXX:
+        std::cout << "  jxx:  ";
+        goto print_loc;
+    case SRC_JMP:
+        std::cout << "  jmp:  ";
+    print_loc:
+        std::cout 
+            << "0x" << to_hex(instr.loc) << " -> " 
+            << (instr.des ? 
+                ("0x" + to_hex(*instr.des)) : "computed" )
+            << std::endl;                           
+        break;
+    case SRC_RET:
+        std::cout 
+            << "  return: " << to_hex(*instr.des) 
+            << " -> _" << std::endl;
+        break;
+    case SRC_OTHER:
+        break;
+    }
 }
 
 
