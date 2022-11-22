@@ -55,6 +55,7 @@ typedef struct trace_element {
         struct { /* Call */
             u64 loc;
             u64 qemu_des;
+            bool is_breakpoint;
         } call;
 
         u64 block_size; /* Block Size */
@@ -76,5 +77,8 @@ static bool parse_jxx_ldst(std::string& line, trace_element& out);
 static bool parse_call(std::string& line, trace_element& out);
 
 static void print_trace_element(trace_element& elmnt);
+
+static u64 parse_ip(std::string& line, u32& pos);
+static u64 parse_id(std::string& line, u32& pos);
 
 #endif

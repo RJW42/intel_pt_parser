@@ -19,30 +19,23 @@ static void print_packet_debug(
 
 static void update_current_ip(
     u64& current_ip, u64 new_ip, 
-    u64 qemu_caller_ip, u64 qemu_memory_offset,
-    bool& tracing_qemu_code, bool& tracing_jit_code,
+    u64 qemu_caller_ip, bool& tracing_jit_code,
     bool in_psb = false
 );
 
 static void follow_asm(
     std::optional<tnt_packet_data> tnt_packet, u64& current_ip, 
-    u64 qemu_return_ip, u64 qemu_caller_ip, 
-    u64 qemu_memory_offset, u64& qemu_call_adr, 
-    bool& next_tip_is_qemu_call, std::stack<u64>& call_stack, 
-    bool& tracing_qemu_code, bool& tracing_jit_code
+    u64 qemu_return_ip, u64 qemu_caller_ip, bool& tracing_jit_code,
+    bool& next_tip_is_breakpoint, u64& last_block_ip,
+    bool& next_tnt_is_breakpoint_ret
 );
 
 static std::optional<pt_instruction> get_next_instr(
-    u64 current_ip, u64 qemu_memory_offset, 
-    bool tracing_qemu_code, bool tracing_jit_code
+    u64 current_ip, bool tracing_jit_code
 );
 
 static inline pt_instruction_type jit_to_pt_instr_type(
     jit_asm_type type
-);
-
-static inline pt_instruction_type src_to_pt_instr_type(
-    src_asm_instruction type
 );
 
 static void load_output_file(char *file_name);

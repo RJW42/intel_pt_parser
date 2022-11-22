@@ -114,11 +114,18 @@ struct pt_instruction {
     bool is_qemu_src;
     u64 loc;
     u64 des; /* des of jump / call, empty for ret*/
+    bool is_breakpoint;
 
 
     pt_instruction(
         pt_instruction_type type, bool is_qemu_src, u64 loc, u64 des
-    ) : type(type), is_qemu_src(is_qemu_src), loc(loc), des(des) {};
+    ) : type(type), is_qemu_src(is_qemu_src), loc(loc), des(des),
+        is_breakpoint(false) {};
+    pt_instruction(
+        pt_instruction_type type, bool is_qemu_src, u64 loc, u64 des, 
+        bool is_breakpoint
+    ) : type(type), is_qemu_src(is_qemu_src), loc(loc), des(des),
+        is_breakpoint(is_breakpoint) {};
 };
 
 #endif
