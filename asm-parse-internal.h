@@ -5,8 +5,10 @@
 #include <stdbool.h>
 
 #include <string>
+#include <map>
 
 #include "types.h"
+#include "asm-parse.h"
 
 typedef enum trace_type {
     BLOCK,
@@ -59,9 +61,15 @@ typedef struct trace_element {
         } call;
 
         u64 block_size; /* Block Size */
-        
     };
 } trace_element;
+
+typedef struct basic_block {
+    u64 start_ip;
+    u64 end_ip;
+    u64 size;
+    std::map<u64, jit_asm_instruction*> instructions;
+} basic_block;
 
 
 static bool parse_trace_element(std::string& line, trace_element& out);

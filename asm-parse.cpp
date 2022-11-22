@@ -12,11 +12,13 @@
 #include <unordered_map>
 #include <map>
 
-//#define ASM_PARSE_DEBUG_
+#include <chrono>
+
+#define ASM_PARSE_DEBUG_
 
 static std::ifstream asm_file;
 static std::map<u64, jit_asm_instruction*> instructions;
-static std::map<u64, u64> block_sizes;
+static std::map<u64, basic_block*> blocks;
 
 void asm_init(const char* asm_file_name) 
 {
@@ -30,16 +32,31 @@ void asm_init(const char* asm_file_name)
 
 jit_asm_instruction* get_next_jit_instr(u64 current_ip)
 {
-    using namespace std;
-    auto low = instructions.lower_bound(current_ip);
+    static basic_block *current_block = NULL;
+    if(current_block == NULL || 
+       current_ip < current_block->start_ip || 
+       current_ip > current_block->end_ip){
+        auto block = blocks.upper_bound(current_ip);
 
-    if(low == instructions.end()) {
+        if(block == blocks.begin() || 
+          (current_ip > (--block)->second->end_ip)) {
+            printf("Failed to find block for: %lX\n", current_ip); 
+            exit(EXIT_FAILURE);    
+        }
+
+        current_block = block->second;
+    }
+
+    auto instr = current_block->instructions.lower_bound(current_ip);
+
+    if(instr == current_block->instructions.end()) {
         printf("Failed to find next instruction for: %lX\n", current_ip); 
         exit(EXIT_FAILURE);
     }
 
-    return low->second;
+    return instr->second;
 }
+
 
 u64 get_last_jmp_loc(void) 
 {
@@ -50,28 +67,28 @@ u64 get_last_jmp_loc(void)
 bool ip_inside_block(u64 ip) 
 {
     using namespace std;
-    auto block = block_sizes.find(ip);
+    auto block = blocks.find(ip);
 
-    if(block != block_sizes.end()) { 
+    if(block != blocks.end()) { 
 #ifdef ASM_PARSE_DEBUG_
         printf("    INSIDE JIT: 0x%lX -> 0x%lX\n", ip, block->first);
 #endif
         return true;
     }
 
-    auto low = block_sizes.upper_bound(ip);
+    auto block_ = blocks.upper_bound(ip);
 
-    if(low == block_sizes.begin()) {
+    if(block_ == blocks.begin()) {
         return false;
     }
-    low--;
+    block_--;
 
-    if(!(ip < (low->first + low->second))) {
+    if(!(ip < (block_->second->end_ip))) {
         return false;
     }
 
 #ifdef ASM_PARSE_DEBUG_
-    printf("    INSIDE JIT: 0x%lX -> 0x%lX\n", ip, low->first);
+    printf("    INSIDE JIT: 0x%lX -> 0x%lX\n", ip, block_->first);
 #endif
 
     return true;
@@ -79,17 +96,29 @@ bool ip_inside_block(u64 ip)
 
 
 /* ***** Parsing ***** */
+static inline void save_instruction(jit_asm_instruction *instr, basic_block* bb) 
+{
+    if(bb == NULL) {
+        std::cerr << "Error: Cannot save instruction to NULL block" << std::endl;       
+    }
+
+    instructions.emplace(instr->loc, instr);
+    bb->instructions.emplace(instr->loc, instr);    
+}
 
 void advance_to_mode(void)
 {
     using namespace std;
-    string line;
     static int calls = 0;
     calls++;
 
     /* Track jumps waiting for a label*/
     unordered_map<int, trace_element> unset_jxx; 
-    u64 current_block = 0;
+
+    /* Track the current basic block */
+    basic_block *current_block = NULL;
+
+    string line;
 
     while(getline(asm_file, line)) {
         trace_element curr;
@@ -107,22 +136,32 @@ void advance_to_mode(void)
         // Handle the parsed trace element
         switch (curr.type) {
         case BLOCK: // Store the block start
-            current_block = curr.block_ip;
+            if(current_block != NULL) {
+                printf("    Error cannot start a new block until previous saved\n");
+                exit(EXIT_FAILURE);
+            }
+
+            current_block = new basic_block();
+            current_block->start_ip = curr.block_ip;
             //  todo: maybe want to check if there if there are unset jumps 
             break;
         case BLOCK_SIZE: // Record block size
-            if(current_block == 0) {
+            if(current_block == NULL) {
                 printf("    Error found block size without a block to map too\n");
                 exit(EXIT_FAILURE);
             }
 
-            block_sizes[current_block] = curr.block_size;
-            current_block = 0;
+            current_block->size = curr.block_size;
+            current_block->end_ip = current_block->start_ip + curr.block_size;
+
+            blocks[current_block->start_ip] = current_block;
+            
+            current_block = NULL;
             break;
         case JMP: // Store jmp
-            instructions.emplace(curr.jmp.loc, new jit_asm_instruction(
+            save_instruction(new jit_asm_instruction(
                 JIT_JMP, curr.jmp.loc, curr.jmp.des
-            ));
+            ), current_block);
             break;
         case JXX: // Store this JXX until a label is found
             if(unset_jxx.find(curr.jxx.id) != unset_jxx.end()) {
@@ -133,14 +172,14 @@ void advance_to_mode(void)
             unset_jxx[curr.jxx.id] = curr; 
             break;
         case JXX_LDST: // Store jmp
-            instructions.emplace(curr.jmp.loc, new jit_asm_instruction(
+            save_instruction(new jit_asm_instruction(
                 JIT_JXX, curr.jxx_ldst.loc, curr.jxx_ldst.des
-            ));
+            ), current_block);
             break;
         case CALL: // Store call
-            instructions.emplace(curr.call.loc, new jit_asm_instruction(
+            save_instruction(new jit_asm_instruction(
                 JIT_CALL, curr.call.loc, curr.call.is_breakpoint
-            ));
+            ), current_block);
             break;
         case UPDATE: // Update jmp
             instructions[curr.update.loc]->des = curr.update.new_des;
@@ -155,9 +194,9 @@ void advance_to_mode(void)
 
             trace_element jxx = unset_jxx[curr.label.id];
             
-            instructions.emplace(jxx.jxx.loc, new jit_asm_instruction(
+            save_instruction(new jit_asm_instruction(
                 JIT_JXX, jxx.jxx.loc, curr.label.loc
-            ));
+            ), current_block);
 
             unset_jxx.erase(curr.label.id);
             break;
@@ -166,6 +205,11 @@ void advance_to_mode(void)
         case IPT_START: // Finished parsing
             if(unset_jxx.size() > 0) {
                 cout << "Reach ipt_start and there is still unset jxx instructions" << endl;
+
+                for(auto& i : unset_jxx) {
+                    cout << i.second.jxx.loc << endl;
+                }
+
                 exit(EXIT_FAILURE);
             }
 

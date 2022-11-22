@@ -25,7 +25,7 @@ static u64 size;
 static std::unordered_map<u64, u64> host_ip_to_guest_ip;
 static bool use_asm;
 
-// #define DEBUG_MODE_
+#define DEBUG_MODE_
 #define DEBUG_TIME_
 
 #define BYTE_TO_BINARY_PATTERN "%c%c%c%c%c%c%c%c"
@@ -111,6 +111,10 @@ void parse(void)
     bool next_tip_is_breakpoint = false;
     bool next_tnt_is_breakpoint_ret = false;
 
+    bool handling_qemu_call = false;
+
+    bool next_fup_is_reset = false;
+
     u64 breakpoint_ip = 0; 
     u64 last_block_ip = 0;
 
@@ -150,10 +154,14 @@ void parse(void)
                 qemu_caller_ip = packet.tip_data.ip;
             }
 
-            if(!(in_fup && !in_psb) || 
+            if(in_fup && next_fup_is_reset) {
+                next_fup_is_reset = false;
+
+
+                update_current_ip(current_ip, packet.tip_data.ip, qemu_caller_ip, tracing_jit_code);
+            } else if(!(in_fup && !in_psb) || 
                 (in_fup && packet.tip_data.type != TIP_FUP &&
-                 packet.tip_data.ip != current_ip
-                )
+                 packet.tip_data.ip != current_ip)
             ) {
                 // Can Update Ip 
                 in_fup = false;
@@ -188,9 +196,11 @@ void parse(void)
             in_psb = true;
         } else if(packet.type == PSBEND){
             in_psb = false;
-        }else if(packet.type == TNT) {
+        } else if(packet.type == TNT) {
             tnt_packet = { packet.tnt_data };
-        } 
+        } else if(packet.type == OVF) {
+            next_fup_is_reset = true;
+        }
 
         // Follow all asm if we can
         if((packet.type == TNT || packet.type == TIP) && use_asm) {
@@ -198,7 +208,8 @@ void parse(void)
                 tnt_packet, current_ip, qemu_return_ip,
                 qemu_caller_ip, tracing_jit_code,
                 next_tip_is_breakpoint, last_block_ip,
-                next_tnt_is_breakpoint_ret
+                next_tnt_is_breakpoint_ret, breakpoint_ip,
+                handling_qemu_call
             );
         }
     }
@@ -209,7 +220,7 @@ static inline void follow_asm(
     std::optional<tnt_packet_data> tnt_packet, u64& current_ip, 
     u64 qemu_return_ip, u64 qemu_caller_ip, bool& tracing_jit_code,
     bool& next_tip_is_breakpoint, u64& last_block_ip,
-    bool& next_tnt_is_breakpoint_ret
+    bool& next_tnt_is_breakpoint_ret, u64 breakpoint_ip, bool& handling_qemu_call
 ) {
     // Follow instructions until either
     //      1. A condtional jmp without a corispdongin tnt is reached
@@ -221,6 +232,7 @@ static inline void follow_asm(
     if(next_tnt_is_breakpoint_ret && tnt_packet) {
         // Need to leave helper before we can continue tracing jit code 
         next_tnt_is_breakpoint_ret = false;
+        handling_qemu_call = false;
 
         if(!(*tnt_packet).tnt[tnt_packet_p++]) {
 #ifdef DEBUG_MODE_
@@ -262,7 +274,7 @@ static inline void follow_asm(
     }
 
 
-    if((!tracing_jit_code)) return;
+    if((!tracing_jit_code) || handling_qemu_call) return;
 
     bool reached_unbindined_jmp = false;
 
@@ -346,16 +358,17 @@ static inline void follow_asm(
 
             if(!instr.is_breakpoint) {
 #ifdef DEBUG_MODE_
-                printf("    CALL: %lX -> QEMU\n", instr.loc);
+                printf("    CALL: 0x%lX -> QEMU\n", instr.loc);
 #endif
+                handling_qemu_call = true;
                 break;
             }
 
 #ifdef DEBUG_MODE_
-            printf("    CALL: %lX -> BreakPoint\n", instr.loc);
+            printf("    CALL: 0x%lX -> BreakPoint\n", instr.loc);
 #endif
 
-            if(last_block_ip == 0) { 
+            if(breakpoint_ip == 0) { 
                 // Todo: the reason for this if statement is when we get 
                 // a tip packet inbetween a function and breakpoint call
                 // this can happen sometimes and is annoying 
@@ -418,6 +431,11 @@ static inline void update_current_ip(
 #ifdef DEBUG_MODE_
         printf("    Host IP: 0x%lX -> Guest IP: 0x%lX\n", current_ip, guest_ip);
 #endif
+
+        if(!tracing_jit_code) {
+            printf("    Error: The block containing 0x%lX has not been parsed yet", current_ip);
+            exit(EXIT_FAILURE);
+        }
     }
 }
 

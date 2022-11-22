@@ -27,7 +27,7 @@ static void follow_asm(
     std::optional<tnt_packet_data> tnt_packet, u64& current_ip, 
     u64 qemu_return_ip, u64 qemu_caller_ip, bool& tracing_jit_code,
     bool& next_tip_is_breakpoint, u64& last_block_ip,
-    bool& next_tnt_is_breakpoint_ret
+    bool& next_tnt_is_breakpoint_ret, u64 breakpoint_ip, bool& handling_qemu_call
 );
 
 static std::optional<pt_instruction> get_next_instr(
