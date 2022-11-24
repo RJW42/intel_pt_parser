@@ -14,29 +14,26 @@ static unsigned long get_mapping(unsigned long host_pc);
 static void log_basic_block(unsigned long id);
 
 static void print_packet_debug(
-    pt_packet packet, u64& pad_count
+    pt_packet packet, pt_state& state
 );
 
 static void update_current_ip(
-    u64& current_ip, u64 new_ip, 
-    u64 qemu_caller_ip, bool& tracing_jit_code,
-    bool in_psb = false
+    pt_state& state, u64 ip
 );
 
-static void follow_asm(
-    std::optional<tnt_packet_data> tnt_packet, u64& current_ip, 
-    u64 qemu_return_ip, u64 qemu_caller_ip, bool& tracing_jit_code,
-    bool& next_tip_is_breakpoint, u64& last_block_ip,
-    bool& next_tnt_is_breakpoint_ret, u64 breakpoint_ip, bool& handling_qemu_call
-);
+static void handle_tip(pt_state& state);
+
+static void follow_asm(pt_state& state);
 
 static std::optional<pt_instruction> get_next_instr(
-    u64 current_ip, bool tracing_jit_code
+    pt_state& state, u64 ip
 );
 
-static inline pt_instruction_type jit_to_pt_instr_type(
+static pt_instruction_type jit_to_pt_instr_type(
     jit_asm_type type
 );
+
+static bool can_follow_asm(pt_state& state);
 
 static void load_output_file(char *file_name);
 static void load_trace_file(char *file_name);

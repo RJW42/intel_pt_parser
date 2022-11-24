@@ -14,7 +14,7 @@
 
 #include <chrono>
 
-#define ASM_PARSE_DEBUG_
+// #define ASM_PARSE_DEBUG_
 
 static std::ifstream asm_file;
 static std::map<u64, jit_asm_instruction*> instructions;
@@ -40,8 +40,11 @@ jit_asm_instruction* get_next_jit_instr(u64 current_ip)
 
         if(block == blocks.begin() || 
           (current_ip > (--block)->second->end_ip)) {
-            printf("Failed to find block for: %lX\n", current_ip); 
-            exit(EXIT_FAILURE);    
+            printf(
+                "Error: Failed to find block for: 0x%lX\n", current_ip
+            ); 
+            // exit(EXIT_FAILURE);    
+            return NULL;
         }
 
         current_block = block->second;
@@ -50,8 +53,11 @@ jit_asm_instruction* get_next_jit_instr(u64 current_ip)
     auto instr = current_block->instructions.lower_bound(current_ip);
 
     if(instr == current_block->instructions.end()) {
-        printf("Failed to find next instruction for: %lX\n", current_ip); 
-        exit(EXIT_FAILURE);
+        printf(
+            "Errror: Failed to find next instruction for: 0x%lX\n", current_ip
+        ); 
+        //exit(EXIT_FAILURE);
+        return NULL;
     }
 
     return instr->second;
@@ -106,7 +112,7 @@ static inline void save_instruction(jit_asm_instruction *instr, basic_block* bb)
     bb->instructions.emplace(instr->loc, instr);    
 }
 
-void advance_to_mode(void)
+void advance_to_ipt_start(void)
 {
     using namespace std;
     static int calls = 0;

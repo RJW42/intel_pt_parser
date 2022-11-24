@@ -24,7 +24,7 @@ struct jit_asm_instruction {
 };
 
 void asm_init(const char* asm_file_name);
-void advance_to_mode(void);
+void advance_to_ipt_start(void);
 
 jit_asm_instruction* get_next_jit_instr(u64 current_ip);
 u64 get_last_jmp_loc(void);

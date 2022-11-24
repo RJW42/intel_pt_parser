@@ -25,8 +25,15 @@ static u64 size;
 static std::unordered_map<u64, u64> host_ip_to_guest_ip;
 static bool use_asm;
 
-#define DEBUG_MODE_
+// #define DEBUG_MODE_
 #define DEBUG_TIME_
+
+#ifdef DEBUG_MODE_ 
+#define printf_debug(...); printf(__VA_ARGS__);
+#else 
+#define printf_debug(...);
+
+#endif
 
 #define BYTE_TO_BINARY_PATTERN "%c%c%c%c%c%c%c%c"
 #define BYTE_TO_BINARY(byte)  \
@@ -95,28 +102,7 @@ void parse(void)
     printf(" -------- Intel PT Start ---------- \n\n");
     printf("Size: %lu\n", size);
 #endif
-    u64 qemu_caller_ip = 0;
-    u64 qemu_return_ip = 0;
-
-    u64 last_tip_ip = 0;
-
-    u64 current_ip = 0;
-    u64 pad_count = 0;
-
-    bool tracing_jit_code = false;
-
-    bool in_psb = false;
-    bool in_fup = false;
-
-    bool next_tip_is_breakpoint = false;
-    bool next_tnt_is_breakpoint_ret = false;
-
-    bool handling_qemu_call = false;
-
-    bool next_fup_is_reset = false;
-
-    u64 breakpoint_ip = 0; 
-    u64 last_block_ip = 0;
+    pt_state state; 
 
 #ifdef DEBUG_TIME_
     u8 last_percentage = -1;
@@ -131,268 +117,332 @@ void parse(void)
         }
 #endif
 
-        // Parse The Current Packet
-        pt_packet packet = get_next_packet(last_tip_ip);
-        print_packet_debug(packet, pad_count);
-        
-        std::optional<tnt_packet_data> tnt_packet = std::nullopt;
+        // Get the next packet
+        pt_packet packet = get_next_packet(state.last_tip_ip);
 
-        // Handle This Packet
-        if(packet.type == TIP) {
-            // Update Current IP
-            next_tnt_is_breakpoint_ret = false;
-            last_tip_ip = packet.tip_data.ip;
-
-            if(packet.tip_data.type == TIP_FUP) {
-                in_fup = true;
-            } 
-
-            if(packet.tip_data.type == TIP_TIP && qemu_caller_ip == 0) {
-#ifdef DEBUG_MODE_
-                printf("  Setting qemu_caller_ip: 0x%lX\n", packet.tip_data.ip);
-#endif                
-                qemu_caller_ip = packet.tip_data.ip;
-            }
-
-            if(in_fup && next_fup_is_reset) {
-                next_fup_is_reset = false;
-
-
-                update_current_ip(current_ip, packet.tip_data.ip, qemu_caller_ip, tracing_jit_code);
-            } else if(!(in_fup && !in_psb) || 
-                (in_fup && packet.tip_data.type != TIP_FUP &&
-                 packet.tip_data.ip != current_ip)
-            ) {
-                // Can Update Ip 
-                in_fup = false;
-
-                update_current_ip(
-                    current_ip, packet.tip_data.ip, 
-                    qemu_caller_ip, tracing_jit_code,
-                    in_psb
-                );
-
-                if(qemu_return_ip == 0 && current_ip == qemu_caller_ip) {
-                    qemu_return_ip = get_last_jmp_loc();
-#ifdef DEBUG_MODE_
-                    printf("  Setting qemu_return_ip: 0%lX\n", qemu_return_ip);
-#endif
-                }
-
-                if(current_ip == breakpoint_ip) {
-                    next_tnt_is_breakpoint_ret = true;
-                }
-
-                if(next_tip_is_breakpoint && breakpoint_ip == 0) {
-                    next_tip_is_breakpoint = false;
-                    breakpoint_ip = packet.tip_data.ip;
-
-#ifdef DEBUG_MODE_
-                    printf("  Setting breakpoint_ip: 0%lX\n", breakpoint_ip);
-#endif
-                }
-            } 
-        } else if(packet.type == PSB){
-            in_psb = true;
-        } else if(packet.type == PSBEND){
-            in_psb = false;
-        } else if(packet.type == TNT) {
-            tnt_packet = { packet.tnt_data };
-        } else if(packet.type == OVF) {
-            next_fup_is_reset = true;
+        if(packet.type == PAD) {
+            // No need to track PAD packets as they do not
+            // provide any useful information 
+            state.pad_count++; // Used for debugging 
+            continue;
         }
 
-        // Follow all asm if we can
-        if((packet.type == TNT || packet.type == TIP) && use_asm) {
-            follow_asm(
-                tnt_packet, current_ip, qemu_return_ip,
-                qemu_caller_ip, tracing_jit_code,
-                next_tip_is_breakpoint, last_block_ip,
-                next_tnt_is_breakpoint_ret, breakpoint_ip,
-                handling_qemu_call
-            );
+        print_packet_debug(packet, state);
+
+        if(packet.type == UNKOWN) {
+            // No need to track unkown packets but still 
+            // want to print for debugging purposes 
+            continue;        
+        }
+
+        state.last_packet = &packet;
+
+        // Handle this packet 
+        if(packet.type == PSB) {
+            state.in_psb = true;
+        } else if(packet.type == PSBEND) {
+            state.in_psb = false;
+        } else if(packet.type == TIP) {
+            handle_tip(state);
+        } 
+
+        // Follow asm if possible
+        if(can_follow_asm(state)) {
+            follow_asm(state);
+        }
+
+        // Keep track if the prev packet was mode / ovf
+        state.last_was_mode = false;
+        state.last_was_ovf = false;
+
+        if(packet.type == MODE) {
+            state.last_was_mode = true;
+        } else if(packet.type == OVF) {
+            state.last_was_ovf = true;
         }
     }
 }
 
 
-static inline void follow_asm(
-    std::optional<tnt_packet_data> tnt_packet, u64& current_ip, 
-    u64 qemu_return_ip, u64 qemu_caller_ip, bool& tracing_jit_code,
-    bool& next_tip_is_breakpoint, u64& last_block_ip,
-    bool& next_tnt_is_breakpoint_ret, u64 breakpoint_ip, bool& handling_qemu_call
-) {
-    // Follow instructions until either
-    //      1. A condtional jmp without a corispdongin tnt is reached
-    //      2. A computed jmp is reached 
+static inline void handle_tip(pt_state& state) 
+{
+    tip_packet_data *tip_data = &state.last_packet->tip_data;
 
-    // Keep track of the position in tnt packet 
-    u32 tnt_packet_p = 0;
+    state.last_tip_was_breakpoint = 
+        tip_data->ip == state.breakpoint_ip;
+        // If a call to the breakpoint has been made record this in 
+        // the state so it can be used to continue to follow asm
 
-    if(next_tnt_is_breakpoint_ret && tnt_packet) {
-        // Need to leave helper before we can continue tracing jit code 
-        next_tnt_is_breakpoint_ret = false;
-        handling_qemu_call = false;
+    if(tip_data->type == TIP_TIP && state.breakpoint_ip == 0 &&
+       state.next_tip_is_breakpoint) {
+        // This is the first call to the breakpoint functoin. We can 
+        // use this ip to record it for future use 
+        state.breakpoint_ip = tip_data->ip;
+        state.last_tip_was_breakpoint = true;
 
-        if(!(*tnt_packet).tnt[tnt_packet_p++]) {
-#ifdef DEBUG_MODE_
-            printf("  Warning next_tnt_is_breakpoint but tnt_packet is false\n");
-#endif
-            return;
-        }
-
-#ifdef DEBUG_MODE_
-        printf("  RET. BreakPoint Skipping next two calls\n");
-#endif
-
-        std::optional<pt_instruction> maybe_instr;
-        int i = 0;
-
-        while( i++ < 2 && (maybe_instr = get_next_instr(
-            last_block_ip, true
-        ))) {
-            auto instr = *maybe_instr;
-
-            if(instr.type != PT_CALL) {
-#ifdef DEBUG_MODE_
-                printf("  Warning next instr was not call\n");
-#endif
-                return;                
-            }
-
-            last_block_ip = instr.loc + 1;
-        }
-
-#ifdef DEBUG_MODE_
-        printf("  RET. BreakPoint -> %lX\n", last_block_ip);
-#endif
-
-        update_current_ip(
-            current_ip, last_block_ip, 
-            qemu_caller_ip, tracing_jit_code
+        printf_debug(
+            "  Setting: breakpoint_ip: 0x%lX\n", state.breakpoint_ip
         );
     }
 
 
-    if((!tracing_jit_code) || handling_qemu_call) return;
+    if(tip_data->type == TIP_TIP && state.qemu_caller_ip == 0) {
+        // This is the first TIP packet of the trace. We can use 
+        // this ip as the qemu_call_ip, called after every ipt_start 
+        state.qemu_caller_ip = tip_data->ip;
+        
+        printf_debug(
+            "  Setting: qemu_caller_ip: 0x%lX\n", state.qemu_caller_ip
+        );
+    }
+    
 
-    bool reached_unbindined_jmp = false;
+    if(tip_data->type == TIP_FUP &&
+            !(state.last_was_mode || state.last_was_ovf)
+        ) {
+        // We have found an unbound FUP packet. Expecting to 
+        // to see a pgd packet to bind to this one 
+        state.in_fup = true;
+    }
 
-    std::optional<pt_instruction> maybe_instr;
+    if((tip_data->type == TIP_PGD || tip_data->type == TIP_PGE) && 
+        state.in_fup) {
+        // We have found an a PGD packet which binds to the 
+        // previous FUP packet 
+        state.in_fup = false;
+    }
 
-    while(
-        !reached_unbindined_jmp && (
-            maybe_instr = get_next_instr(
-                current_ip, tracing_jit_code
-            ))
-    ) {
+    if(state.in_fup) { // Cannot update current ip
+        printf_debug("  IN FUP\n");
+        return;
+    }
+
+
+    // Can update the current ip 
+    state.last_tip_ip = tip_data->ip;
+    update_current_ip(state, tip_data->ip);
+
+
+    if(tip_data->ip == state.qemu_caller_ip && state.qemu_return_ip == 0) {
+        // If we have just set the qemu_caller_ip, after updating the 
+        // current ip the first basic block of asm will be parsed 
+        // we can use this to get the qemu_return_ip, jumped to prior to 
+        // leaving jit code. It is always the last jmp in a block 
+        state.qemu_return_ip = get_last_jmp_loc();
+
+        printf_debug(
+            "  Setting: qemu_return_ip: 0x%lX\n", state.qemu_return_ip
+        );
+    }
+
+    // reset if needed 
+    state.next_tip_is_breakpoint = false;
+}
+
+
+static inline bool can_follow_asm(pt_state& state)
+{
+    return 
+        (
+            (state.last_packet->type == TIP && !state.in_fup && 
+             !state.last_tip_was_breakpoint /* want to wait for tnt */) || 
+            (state.last_packet->type == TNT)
+        ) && (
+            !state.in_psb
+        ) && use_asm;
+}
+
+
+static inline void follow_asm(pt_state& state)
+{
+    bool has_tnt = state.last_packet->type == TNT;
+
+    u32 tnt_packet_p = 0;
+    tnt_packet_data *tnt_packet = has_tnt ? 
+        &state.last_packet->tnt_data : NULL;
+
+    // Check if we have just exited a breakpoint
+    if(state.last_tip_was_breakpoint) {
+        if(!has_tnt) {
+            printf("Error: cannot return from breakpoint without tnt\n");
+            exit(EXIT_FAILURE);
+        }
+
+        if(!tnt_packet->tnt[tnt_packet_p++]) {
+            printf("Error: return from breakpoint but tnt marked as not taken\n");
+            exit(EXIT_FAILURE);
+        }
+
+        // can return from this breakpoint call
+        state.last_tip_was_breakpoint = false;
+
+        update_current_ip(
+            state, state.breakpoint_return_ip
+        );
+    }
+
+    // Follow instructoins until either 
+    //  1. A conditional jmp without a corisponding tnt is reached
+    //  2. A call to qemu code is reached 
+
+     if(!state.tracing_jit_code)
+        return; // Not in jitted code, no asm to follow
+
+    bool can_continue = true;
+
+    while(can_continue && state.tracing_jit_code) {
+        // Get the next instruction to follow 
+        auto maybe_instr = get_next_instr(state, state.current_ip);
+
+        if(!maybe_instr) {
+            can_continue = false;
+            break;
+        }
+
         auto instr = *maybe_instr;
 
-        last_block_ip = instr.loc + 1;
+        // Follow this instruction 
+        switch(instr.type) {
+        case PT_JMP: // Follow this jump 
+            printf_debug(
+                "  TU. 0x%lX jmp 0x%lX\n", instr.loc, instr.des
+            );
 
-        switch (instr.type) {
-        case PT_JMP: { // Follow this jump
-            u64 l = instr.loc;
-            u64 d = instr.des;
-#ifdef DEBUG_MODE_
-            printf("  TU. JMP: 0x%lX -> 0x%lX\n", l - offset, d - offset); 
-#endif
-
-            if(d == qemu_return_ip) {
-#ifdef DEBUG_MODE_
-                printf("    JMP out of bounds\n");
-#endif
-                tracing_jit_code = false;
-                return;
+            if(instr.des == state.qemu_return_ip) {
+                printf_debug("    JMP. leaving jit code\n");
+                // Leaving jit code, cannot continue to follow asm
+                // this will be updated in the state by update_current_ip
             }
 
             update_current_ip(
-                current_ip, d, qemu_caller_ip, tracing_jit_code
+                state, instr.des
             );
             break;
-        } case PT_JXX: { // Handle this conditional jump
-            // Check if there is a tnt bit for this jump
-            if(!tnt_packet || tnt_packet_p >= (*tnt_packet).size) {
-                reached_unbindined_jmp = true;
+        case PT_JXX: // Follow this conditional jump
+            if(!has_tnt || tnt_packet_p >= tnt_packet->size) {
+                // Need more tnt packet data to continue 
+                can_continue = false;
                 break;
             }
 
-            u64 l = instr.loc;
-            u64 d = instr.des;
-
-            if(!(*tnt_packet).tnt[tnt_packet_p++]) {
+            if(!tnt_packet->tnt[tnt_packet_p++]) {
                 // Conditional jump is not taken
-#ifdef DEBUG_MODE_
-                printf("  NT. JMP: 0x%lX -> 0x%lX\n", l - offset, d - offset);
-#endif
-                current_ip = l + 1;
+                state.current_ip = instr.loc + 1;
+
+                printf_debug(
+                    "  NT. 0x%lX jxx 0x%lX\n", instr.loc, instr.des
+                );
+
                 break;
             }
 
             // Conditional jump is taken
-#ifdef DEBUG_MODE_
-            printf("  TC. JMP: 0x%lX -> 0x%lX\n", l - offset, d - offset);
-#endif
+            printf_debug(
+                "  TC. 0x%lX jxx 0x%lX\n", instr.loc, instr.des
+            );
 
-             if(d == qemu_return_ip) {
-#ifdef DEBUG_MODE_
-                printf("    JMP out of bounds\n");
-#endif
-                tracing_jit_code = false;
-                return;
+            if(instr.des == state.qemu_return_ip) {
+                printf_debug("    JMP. leaving jit code\n");
+                // Leaving jit code, cannot continue to follow asm
+                // this will be updated in the state by update_current_ip
             }
 
             update_current_ip(
-                current_ip, d, qemu_caller_ip, tracing_jit_code
+                state, instr.des
             );
             break;
-        } case PT_RET:
-#ifdef DEBUG_MODE_
-            printf("    RET. Not Handled\n");
-#endif  
+        case PT_CALL: { // Handle this call
+            // TODO: Need to move the first instance of the call to the first basic block
+
+            // Cannot continue to follow calls 
+            can_continue = false;
+
+            u64 breakpoint_return_ip = instr.loc + 1;
+
+
+            if(instr.is_breakpoint) {
+                printf_debug(
+                    "  TU. 0x%lX call breakpoint\n", instr.loc
+                );
+                
+                state.next_tip_is_breakpoint = true;
+            } else {
+                printf_debug(
+                    "  TU. 0x%lX call qemu\n", instr.loc
+                );
+
+                // return is not next instruction, but next again
+                auto mi = get_next_instr(
+                    state, breakpoint_return_ip
+                );
+
+                if(!mi) {
+                    printf("    Error: qemu call is not followed by breakpoint\n");
+                    exit(EXIT_FAILURE);
+                }
+
+                breakpoint_return_ip = (*mi).loc + 1;
+            }
+
+            state.breakpoint_return_ip = breakpoint_return_ip;
+
             break;
-        case PT_CALL:
-            reached_unbindined_jmp = true;
+        } }
+    }
+}  
 
-            last_block_ip = instr.loc - 2;
 
-            if(!instr.is_breakpoint) {
-#ifdef DEBUG_MODE_
-                printf("    CALL: 0x%lX -> QEMU\n", instr.loc);
-#endif
-                handling_qemu_call = true;
-                break;
-            }
+static inline void update_current_ip(
+    pt_state& state, u64 ip
+) {
+    state.current_ip = ip;
 
-#ifdef DEBUG_MODE_
-            printf("    CALL: 0x%lX -> BreakPoint\n", instr.loc);
-#endif
-
-            if(breakpoint_ip == 0) { 
-                // Todo: the reason for this if statement is when we get 
-                // a tip packet inbetween a function and breakpoint call
-                // this can happen sometimes and is annoying 
-                last_block_ip = instr.loc + 2;
-            
-                next_tip_is_breakpoint = true;
-            }
-        }
+    // Check if we can advance the asm
+    if(state.current_ip == state.qemu_caller_ip) {
+        advance_to_ipt_start();
     }
 
-    // Check that there is nothing left in the tnt packet ? 
+    // Check if this ip is jitted code 
+    state.tracing_jit_code = ip_inside_block(ip);
+
+    // Check if this ip maps to a basic block
+    u64 guest_ip = get_mapping(state.current_ip);
+
+    if(guest_ip == 0) 
+        return; // Doesn't map nothng more to do 
+    // Does map log it and check for errors 
+    
+    log_basic_block(guest_ip);
+
+    printf_debug(
+        "    Host IP: 0x%lX -> Guest IP: 0x%lX\n", 
+        state.current_ip, guest_ip
+    );
+
+    if(!state.tracing_jit_code) {
+        printf(
+            "    Error: The block containing the above ip"
+            " has not been translated\n"
+        );
+        exit(EXIT_FAILURE);
+    }   
 }
 
 
 
+/* Instructions */
+
 static inline std::optional<pt_instruction> get_next_instr(
-    u64 current_ip, bool tracing_jit_code
+    pt_state& state, u64 ip
 ) {
     // Todo: Maybe add an option to check the next instruction
     //       is not outside of the current block 
-    if(!tracing_jit_code) return std::nullopt;
+    if(!state.tracing_jit_code) return std::nullopt;
     
     // Simple case jit instruction
-    auto *instr = get_next_jit_instr(current_ip);
+    auto *instr = get_next_jit_instr(ip);
+
+    if(instr == NULL) return std::nullopt;
 
     return { pt_instruction(
         jit_to_pt_instr_type(instr->type), false,
@@ -412,47 +462,13 @@ static inline pt_instruction_type jit_to_pt_instr_type(
 }
 
 
-static inline void update_current_ip(
-    u64& current_ip, u64 new_ip, 
-    u64 qemu_caller_ip, bool& tracing_jit_code,
-    bool in_psb
-) {
-    current_ip = new_ip;
-    u64 guest_ip = get_mapping(current_ip);
 
-    if(current_ip == qemu_caller_ip) {
-        advance_to_mode();
-    }
-
-    tracing_jit_code = ip_inside_block(current_ip);
-
-    if(guest_ip != 0 && !in_psb) { 
-        log_basic_block(guest_ip);
-#ifdef DEBUG_MODE_
-        printf("    Host IP: 0x%lX -> Guest IP: 0x%lX\n", current_ip, guest_ip);
-#endif
-
-        if(!tracing_jit_code) {
-            printf("    Error: The block containing 0x%lX has not been parsed yet", current_ip);
-            exit(EXIT_FAILURE);
-        }
-    }
-}
-
-
-static inline void print_packet_debug(pt_packet packet, u64& pad_count)
+static inline void print_packet_debug(pt_packet packet, pt_state& state)
 {
 #ifdef DEBUG_MODE_
-    if(packet.type == PAD) {
-        pad_count++;
-        return;
-    }
-
-    if(pad_count > 0) {
-#ifdef DEBUG_MODE_
-        printf("PAD x %lu\n", pad_count);
-#endif
-        pad_count = 0;
+    if(state.pad_count > 0) {
+        printf("PAD x %lu\n", state.pad_count);
+        state.pad_count = 0;
     }
 
     print_packet(packet);
@@ -461,7 +477,6 @@ static inline void print_packet_debug(pt_packet packet, u64& pad_count)
 
 
 /* ***** Parsing ***** */
-
 static pt_packet get_next_packet(u64 curr_ip)
 {
     std::optional<pt_packet> packet;
@@ -1074,7 +1089,7 @@ static void print_packet(const pt_packet& packet)
         printf("PIP\n");
         break;
     case MODE:
-        printf("\n ----- MODE ----- \n\n");
+        printf("MODE\n");
         break;
     case TRACE_STOP:
         printf("TRACE_STOP\n");

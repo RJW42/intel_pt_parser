@@ -104,7 +104,6 @@ struct pt_packet {
 enum pt_instruction_type {
     PT_JMP,
     PT_JXX,
-    PT_RET,
     PT_CALL
 };
 
@@ -126,6 +125,77 @@ struct pt_instruction {
         bool is_breakpoint
     ) : type(type), is_qemu_src(is_qemu_src), loc(loc), des(des),
         is_breakpoint(is_breakpoint) {};
+};
+
+
+struct pt_state {
+    /* The current instruction poitner (ip) value */
+    u64 current_ip;
+
+    /* Store the last TIP ip value. This is used for 
+     * for generating the next value */
+    u64 last_tip_ip;
+
+    /* If this ip is seen it indicates that intel pt 
+     * has been started, so we can advance asm */
+    u64 qemu_caller_ip;
+
+    /* If this ip is seen it indicates that we are 
+     * about to leave JITed code and return to qemu */
+    u64 qemu_return_ip;
+
+    /* Store the number of pads seen. Used for debugging */
+    u64 pad_count;
+
+    /* The ip of the breakpoint function */
+    u64 breakpoint_ip;
+
+    /* The ip in jitted code to jump to after a breakpoint call */
+    u64 breakpoint_return_ip;
+
+    /* Store the last seen intel pt packet */
+    pt_packet *last_packet;
+
+    /* Keeps track if we are currently waiting for a psbend */
+    bool in_psb;
+
+    /* Keeps track if we have seen an fup packet and are 
+      * waiting to bind that packet */
+    bool in_fup;
+
+    /* Keeps track if the previous packet was a mode. This is used 
+     * by fup packets to check if it binds to that mode */
+    bool last_was_mode;
+
+    /* Keeps track if the previous packet was a OVF. This is used 
+     * by fup packets to indicate a reset after an overflow */
+    bool last_was_ovf;
+
+    /* Keeps track if we are currently tracing jit code and 
+     * if we are not tracing jit code then we have no asm */
+    bool tracing_jit_code;
+
+    /* Keeps track if the last tip call was a breakpoint call */
+    bool last_tip_was_breakpoint;
+
+    /* Keeps track if the last tnt lead to a call to the breakpoint */
+    bool next_tip_is_breakpoint;
+
+    pt_state() : 
+        current_ip(0),
+        last_tip_ip(0),
+        qemu_caller_ip(0),
+        qemu_return_ip(0),
+        pad_count(0), 
+        breakpoint_ip(0),
+        breakpoint_return_ip(0),
+        in_psb(false),
+        in_fup(false),
+        last_was_mode(false),
+        last_was_ovf(false),
+        tracing_jit_code(false),
+        last_tip_was_breakpoint(false),
+        next_tip_is_breakpoint(false) {};
 };
 
 #endif
