@@ -1,5 +1,6 @@
 #include "asm-parse-internal.h"
 #include "asm-parse.h"
+#include "asm-types.h"
 #include "types.h"
 
 #include <stdio.h>
@@ -14,17 +15,12 @@
 
 #include <chrono>
 
-#define ASM_PARSE_DEBUG_
-
-static std::ifstream asm_file;
-static std::map<u64, jit_asm_instruction*> instructions;
-static std::map<u64, basic_block*> blocks;
-
+// #define ASM_PARSE_DEBUG_
 static u64 start_count = 0;
 
-void asm_init(const char* asm_file_name) 
+void asm_init(asm_state& state, const char* asm_file_name) 
 {
-    asm_file = std::ifstream(asm_file_name);
+    state.asm_file = std::ifstream(asm_file_name);
 }
 
 #define PARSE_ELEMENT(x, y, z) \
@@ -32,15 +28,15 @@ void asm_init(const char* asm_file_name)
 
 /* ***** JMP Management ***** */
 
-jit_asm_instruction* get_next_jit_instr(u64 current_ip)
+jit_asm_instruction* get_next_jit_instr(asm_state& state, u64 current_ip)
 {
     static basic_block *current_block = NULL;
     if(current_block == NULL || 
        current_ip < current_block->start_ip || 
        current_ip > current_block->end_ip){
-        auto block = blocks.upper_bound(current_ip);
+        auto block = state.blocks.upper_bound(current_ip);
 
-        if(block == blocks.begin() || 
+        if(block == state.blocks.begin() || 
           (current_ip > (--block)->second->end_ip)) {
             fprintf(
                 stderr, "Error: Failed to find block for: 0x%lX\n", current_ip
@@ -72,27 +68,27 @@ jit_asm_instruction* get_next_jit_instr(u64 current_ip)
 }
 
 
-u64 get_last_jmp_loc(void) 
+u64 get_last_jmp_loc(asm_state& state) 
 {
-    return (--instructions.end())->second->des;
+    return (--state.instructions.end())->second->des;
 }
 
 
-bool ip_inside_block(u64 ip) 
+bool ip_inside_block(asm_state& state, u64 ip) 
 {
     using namespace std;
-    auto block = blocks.find(ip);
+    auto block = state.blocks.find(ip);
 
-    if(block != blocks.end()) { 
+    if(block != state.blocks.end()) { 
 #ifdef ASM_PARSE_DEBUG_
         printf("    INSIDE JIT: 0x%lX -> 0x%lX\n", ip, block->first);
 #endif
         return true;
     }
 
-    auto block_ = blocks.upper_bound(ip);
+    auto block_ = state.blocks.upper_bound(ip);
 
-    if(block_ == blocks.begin()) {
+    if(block_ == state.blocks.begin()) {
         return false;
     }
     block_--;
@@ -110,17 +106,18 @@ bool ip_inside_block(u64 ip)
 
 
 /* ***** Parsing ***** */
-static inline void save_instruction(jit_asm_instruction *instr, basic_block* bb) 
-{
+static inline void save_instruction(
+    asm_state& state, jit_asm_instruction *instr, basic_block* bb
+) {
     if(bb == NULL) {
         std::cerr << "Error: Cannot save instruction to NULL block" << std::endl;       
     }
 
-    instructions.emplace(instr->loc, instr);
+    state.instructions.emplace(instr->loc, instr);
     bb->instructions.emplace(instr->loc, instr);    
 }
 
-void advance_to_ipt_start(void)
+void advance_to_ipt_start(asm_state& state)
 {
     using namespace std;
     static int calls = 0;
@@ -134,7 +131,7 @@ void advance_to_ipt_start(void)
 
     string line;
 
-    while(getline(asm_file, line)) {
+    while(getline(state.asm_file, line)) {
         trace_element curr;
 
         // Parce the next trace element
@@ -168,51 +165,51 @@ void advance_to_ipt_start(void)
             current_block->size = curr.block_size;
             current_block->end_ip = current_block->start_ip + curr.block_size;
 
-            blocks[current_block->start_ip] = current_block;
+            state.blocks[current_block->start_ip] = current_block;
             
             current_block = NULL;
             break;
         case JMP: // Store jmp
-            save_instruction(new jit_asm_instruction(
-                JIT_JMP, curr.jmp.loc, curr.jmp.des
+            save_instruction(state, new jit_asm_instruction(
+                JIT_JMP, curr.loc, curr.des
             ), current_block);
             break;
         case JXX: // Store this JXX until a label is found
-            if(unset_jxx.find(curr.jxx.id) != unset_jxx.end()) {
+            if(unset_jxx.find(curr.id) != unset_jxx.end()) {
                 cout << "Error label already in use for jxx: " << line << endl;
                 exit(EXIT_FAILURE);
             }
 
-            unset_jxx[curr.jxx.id] = curr; 
+            unset_jxx[curr.id] = curr; 
             break;
         case JXX_LDST: // Store jmp
-            save_instruction(new jit_asm_instruction(
-                JIT_JXX, curr.jxx_ldst.loc, curr.jxx_ldst.des
+            save_instruction(state, new jit_asm_instruction(
+                JIT_JXX, curr.loc, curr.des
             ), current_block);
             break;
         case CALL: // Store call
-            save_instruction(new jit_asm_instruction(
-                JIT_CALL, curr.call.loc, curr.call.is_breakpoint
+            save_instruction(state, new jit_asm_instruction(
+                JIT_CALL, curr.loc, curr.is_breakpoint
             ), current_block);
             break;
         case UPDATE: // Update jmp
-            instructions[curr.update.loc]->des = curr.update.new_des;
+            state.instructions[curr.loc]->des = curr.new_des;
             break;
         case LABEL: {// Use this label to update any jxx insutrctions
-            if(unset_jxx.find(curr.label.id) == unset_jxx.end()) {
+            if(unset_jxx.find(curr.id) == unset_jxx.end()) {
                 cout 
                     << "Error label does not have corrisponding jmp: " 
                     << line << endl;
                 exit(EXIT_FAILURE);
             }
 
-            trace_element jxx = unset_jxx[curr.label.id];
+            trace_element jxx = unset_jxx[curr.id];
             
-            save_instruction(new jit_asm_instruction(
-                JIT_JXX, jxx.jxx.loc, curr.label.loc
+            save_instruction(state, new jit_asm_instruction(
+                JIT_JXX, jxx.loc, curr.loc
             ), current_block);
 
-            unset_jxx.erase(curr.label.id);
+            unset_jxx.erase(curr.id);
             break;
         } case IPT_STOP:
             break;
@@ -221,7 +218,7 @@ void advance_to_ipt_start(void)
                 cout << "Reach ipt_start and there is still unset jxx instructions" << endl;
 
                 for(auto& i : unset_jxx) {
-                    cout << i.second.jxx.loc << endl;
+                    cout << i.second.loc << endl;
                 }
 
                 exit(EXIT_FAILURE);
@@ -245,24 +242,24 @@ static inline void print_trace_element(trace_element& elmnt){
         printf("BLOCK_SIZE: %lu\n", elmnt.block_size);
         break;
     case JMP:
-        printf("  JMP: 0x%lX -> 0x%lX\n", elmnt.jmp.loc, elmnt.jmp.des);
+        printf("  JMP: 0x%lX -> 0x%lX\n", elmnt.loc, elmnt.des);
         break;
     case JXX:
-        printf("  JXX: 0x%lX -> %u\n", elmnt.jxx.loc, elmnt.jxx.id);
+        printf("  JXX: 0x%lX -> %u\n", elmnt.loc, elmnt.id);
         break;
     case JXX_LDST:
-        printf("  JXX_LDST: 0x%lX -> 0x%lX\n", elmnt.jxx_ldst.loc, elmnt.jxx_ldst.des);
+        printf("  JXX_LDST: 0x%lX -> 0x%lX\n", elmnt.loc, elmnt.des);
         break;
     case UPDATE:
-        printf("  UPDATE: 0x%lX -> 0x%lX\n", elmnt.update.loc, elmnt.update.new_des);
+        printf("  UPDATE: 0x%lX -> 0x%lX\n", elmnt.loc, elmnt.new_des);
         break;
     case LABEL:
-        printf("  LBL: %u -> 0x%lX\n", elmnt.label.id, elmnt.label.loc);
+        printf("  LBL: %u -> 0x%lX\n", elmnt.id, elmnt.loc);
         break;
     case CALL:
         std::cout 
-            << "  CALL: 0x" << std::uppercase << std::hex << elmnt.call.loc
-            << " -> " << (elmnt.call.is_breakpoint ? "BreakPoint" : "QEMU")
+            << "  CALL: 0x" << std::uppercase << std::hex << elmnt.loc
+            << " -> " << (elmnt.is_breakpoint ? "BreakPoint" : "QEMU")
             << std::endl;
         break;
     case IPT_START:
@@ -320,11 +317,11 @@ static inline bool parse_jmp(std::string& line, trace_element& out)
     u32 pos = 8;
 
     out.type = JMP;
-    out.jmp.loc = parse_ip(line, pos);
+    out.loc = parse_ip(line, pos);
 
     pos += 2;
 
-    out.jmp.des = parse_ip(line, pos);
+    out.des = parse_ip(line, pos);
 
     return true;
 }
@@ -339,8 +336,8 @@ static inline bool parse_jxx1(std::string& line, trace_element& out)
     u32 pos = 8;
     
     out.type = JXX;
-    out.jxx.loc = parse_ip(line, pos); 
-    out.jxx.id = parse_id(line, pos); 
+    out.loc = parse_ip(line, pos); 
+    out.id = parse_id(line, pos); 
 
     return true;
 }
@@ -356,11 +353,11 @@ static inline bool parse_jxx2(std::string& line, trace_element& out)
     u32 pos = 8;
     
     out.type = JXX_LDST;
-    out.jxx_ldst.loc = parse_ip(line, pos); 
+    out.loc = parse_ip(line, pos); 
     
     pos += 2;
 
-    out.jxx_ldst.des = parse_ip(line, pos);
+    out.des = parse_ip(line, pos);
 
     return true;
 }
@@ -375,11 +372,11 @@ static inline bool parse_jxx_ldst(std::string& line, trace_element& out)
     u32 pos = 12;
     
     out.type = JXX_LDST;
-    out.jxx_ldst.loc = parse_ip(line, pos);
+    out.loc = parse_ip(line, pos);
 
     pos += 2;
 
-    out.jxx_ldst.des = parse_ip(line, pos);
+    out.des = parse_ip(line, pos);
 
     return true;
 }
@@ -394,11 +391,11 @@ static inline bool parse_update(std::string& line, trace_element& out)
     u32 pos = 10;
 
     out.type = UPDATE;
-    out.update.loc = parse_ip(line, pos); 
+    out.loc = parse_ip(line, pos); 
 
     pos += 2;
 
-    out.update.new_des = parse_ip(line, pos);
+    out.new_des = parse_ip(line, pos);
 
     return true;
 }
@@ -412,8 +409,8 @@ static inline bool parse_label(std::string& line, trace_element& out)
     u32 pos = 5;
 
     out.type = LABEL;
-    out.label.id = parse_id(line, pos); 
-    out.label.loc = parse_ip(line, pos);
+    out.id = parse_id(line, pos); 
+    out.loc = parse_ip(line, pos);
 
     return true;
 }
@@ -427,12 +424,12 @@ static inline bool parse_call(std::string& line, trace_element& out)
     u32 pos = 8;
 
     out.type = CALL;
-    out.call.loc = parse_ip(line, pos); 
+    out.loc = parse_ip(line, pos); 
 
     string func_string = line.substr(pos);
 
-    out.call.qemu_des = 0; // get_call_loc(func_string);
-    out.call.is_breakpoint = func_string.compare("ctrace_ipt_breakpoint") == 0;
+    out.qemu_des = 0; // get_call_loc(func_string);
+    out.is_breakpoint = func_string.compare("ctrace_ipt_breakpoint") == 0;
 
     return true;
 }

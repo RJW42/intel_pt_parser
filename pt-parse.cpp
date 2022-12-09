@@ -18,14 +18,9 @@
 #include <optional>
 #include <stack>
 
-static FILE* out_file;
-static FILE* trace_data;
-static u64 offset;
-static u64 size;
+
 static std::unordered_map<u64, u64> host_ip_to_guest_ip;
 static bool use_asm;
-
-static u64 previous_ip = 0;
 
 //#define DEBUG_MODE_
 #define DEBUG_TIME_
@@ -52,16 +47,16 @@ static u64 previous_ip = 0;
 static u8 _buffer[BUFFER_SIZE];
 static u32 _pos_in_buffer = 0;
 
-static void __advance(u8 n);
-static void __get_bytes(u8 *buffer, u8 n);
-static void __load_data_into_buffer(void);
+static void __advance(pt_state& state, u8 n);
+static void __get_bytes(pt_state& state, u8 *buffer, u8 n);
+static void __load_data_into_buffer(pt_state& state);
 
-#define LEFT(n) ((size - offset) >= n)
-#define ADVANCE(n) __advance(n)
-#define GET_BYTES(buffer, size) __get_bytes(buffer, size)
+#define LEFT(n) ((state.size - state.offset) >= n)
+#define ADVANCE(n) __advance(state, n)
+#define GET_BYTES(buffer, size) __get_bytes(state, buffer, size)
 #define INIT_BUFFER(name, size) \
     if(_pos_in_buffer + size > BUFFER_SIZE) {  \
-        __load_data_into_buffer(); \
+        __load_data_into_buffer(state); \
     } \
     u8 *name = _buffer + _pos_in_buffer;
 
@@ -69,9 +64,9 @@ static void __load_data_into_buffer(void);
 #define MIDDLE_BITS(value, uppwer, lower) (value & (((1 << uppwer) - 1) << lower))
 
 #define RETURN_IF(x) \
-    if(x(packet)) return packet
+    if(x(state, packet)) return packet
 #define RETURN_IF_2(x, y) \
-    if(x(packet, y)) return packet
+    if(x(state, packet, y)) return packet
 
 int main() 
 {
@@ -82,38 +77,42 @@ int main()
     char trace_out_file_name[] = "/home/rjw24/pt-trace-data/trace.txt";
 
     use_asm = true;
-
-    if(use_asm) asm_init(asm_file_name);
-
-    load_output_file(trace_out_file_name);
-    load_mapping_file(mapping_file_name);
-    load_trace_file(trace_file_name);
     
-    parse();
+    load_mapping_file(mapping_file_name);
 
-    if(previous_ip != 0) {
-        // Record the lat basic block which may have 
-        // not been saved yet
-        log_basic_block(previous_ip);
+    pt_state state; 
+
+    if(use_asm) { 
+        asm_init(state.asm_parsing_state, asm_file_name);
     }
 
-    fclose(out_file);
+    load_output_file(state, trace_out_file_name);
+    load_trace_file(state, trace_file_name);
+    
+    parse(state);
+
+    if(state.previous_guest_ip != 0) {
+        // Record the lat basic block which may have 
+        // not been saved yet
+        log_basic_block(state, state.previous_guest_ip);
+    }
+
+    fclose(state.out_file);
 
     return 0;
 }
 
 
-void parse(void) 
+void parse(pt_state& state) 
 {
 #ifdef DEBUG_MODE_
     printf(" -------- Intel PT Start ---------- \n\n");
-    printf("Size: %lu\n", size);
+    printf("Size: %lu\n", state.size);
 #endif
-    pt_state state; 
 
     std::optional<pt_packet> maybe_packet;
 
-    while((maybe_packet = try_get_next_packet())) {
+    while((maybe_packet = try_get_next_packet(state))) {
         pt_packet packet = *maybe_packet;
 
         if(packet.type == PAD) {
@@ -221,7 +220,7 @@ static inline void handle_tip(pt_state& state)
         // Want to remove the last ip from the record has we will
         // reach it again. This may not be entierly true tbh 
         printf_debug("  NOTE: Removing previous block from save\n");
-        previous_ip = 0;
+        state.previous_guest_ip = 0;
     }
 
     if(state.in_fup) { // Cannot update current ip
@@ -252,7 +251,9 @@ static inline void handle_tip(pt_state& state)
         // current ip the first basic block of asm will be parsed 
         // we can use this to get the qemu_return_ip, jumped to prior to 
         // leaving jit code. It is always the last jmp in a block 
-        state.qemu_return_ip = get_last_jmp_loc();
+        state.qemu_return_ip = get_last_jmp_loc(
+            state.asm_parsing_state
+        );
 
         printf_debug(
             "  Setting: qemu_return_ip: 0x%lX\n", state.qemu_return_ip
@@ -437,11 +438,13 @@ static inline void update_current_ip(
 
     // Check if we can advance the asm
     if(state.current_ip == state.qemu_caller_ip && use_asm) {
-        advance_to_ipt_start();
+        advance_to_ipt_start(state.asm_parsing_state);
     }
 
     // Check if this ip is jitted code 
-    state.tracing_jit_code = ip_inside_block(ip);
+    state.tracing_jit_code = ip_inside_block(
+        state.asm_parsing_state, ip
+    );
 
     // Check if this ip maps to a basic block
     u64 guest_ip = get_mapping(state.current_ip);
@@ -452,7 +455,7 @@ static inline void update_current_ip(
         return; // Doesn't map nothng more to do 
     // Does map log it and check for errors 
     
-    log_basic_block(guest_ip);
+    log_basic_block(state, guest_ip);
 
     printf_debug(
         "    Host IP: 0x%lX -> Guest IP: 0x%lX\n", 
@@ -480,7 +483,9 @@ static inline std::optional<pt_instruction> get_next_instr(
     if(!state.tracing_jit_code) return std::nullopt;
     
     // Simple case jit instruction
-    auto *instr = get_next_jit_instr(ip);
+    auto *instr = get_next_jit_instr(
+        state.asm_parsing_state, ip
+    );
 
     if(instr == NULL) return std::nullopt;
 
@@ -516,7 +521,7 @@ static inline void print_packet_debug(pt_packet& packet, pt_state& state)
 }
 
 /* ***** Concurrent Parsing ***** */
-static std::optional<pt_packet> try_get_next_packet(void)
+static std::optional<pt_packet> try_get_next_packet(pt_state& state)
 {
 #ifdef DEBUG_TIME_
     static u8 last_percentage = -1;
@@ -524,23 +529,23 @@ static std::optional<pt_packet> try_get_next_packet(void)
     static u64 last_tip_ip = 0;
 
 #ifdef DEBUG_MODE_
-    u64 old_offset = offset;
+    u64 old_offset = state.offset;
 #endif
 
-    if(offset >= size) {
+    if(state.offset >= state.size) {
         // No more packets
         return std::nullopt;
     }
 
 #ifdef DEBUG_TIME_
-    if((u8)(((double)offset / size) * 100) != last_percentage) {
-        last_percentage = ((double)offset / size) * 100;
+    if((u8)(((double)state.offset / state.size) * 100) != last_percentage) {
+        last_percentage = ((double)state.offset / state.size) * 100;
         fprintf(stderr, "TIME: %u%%\n", last_percentage);
         printf("TIME: %u%%\n", last_percentage);
     }
 #endif
 
-    pt_packet packet = get_next_packet(last_tip_ip);
+    pt_packet packet = get_next_packet(state, last_tip_ip);
 
 #ifdef DEBUG_MODE_
     if(packet.type != PAD) printf("OFST: %u: ", old_offset);
@@ -555,7 +560,7 @@ static std::optional<pt_packet> try_get_next_packet(void)
 
 
 /* ***** Parsing ***** */
-static inline pt_packet get_next_packet(u64 curr_ip)
+static inline pt_packet get_next_packet(pt_state& state, u64 curr_ip)
 {
     pt_packet packet(UNKOWN); // Todo: rename unknown 
     
@@ -587,13 +592,13 @@ static inline pt_packet get_next_packet(u64 curr_ip)
     RETURN_IF(parse_cfe);
     RETURN_IF(parse_evd);
 
-    parse_unkown(packet);
+    parse_unkown(state, packet);
 
     return packet;
 }
 
 
-static inline bool parse_short_tnt(pt_packet& packet)
+static inline bool parse_short_tnt(pt_state& state, pt_packet& packet)
 {
     // Attempt to pase a short TNT packet
     if(!LEFT(SHORT_TNT_PACKET_LENGTH))
@@ -631,7 +636,7 @@ static inline bool parse_short_tnt(pt_packet& packet)
     return true;
 }
 
-static inline bool parse_long_tnt(pt_packet& packet)
+static inline bool parse_long_tnt(pt_state& state, pt_packet& packet)
 {
      // Attempt to parse a Long TNT packet 
     if(!LEFT(LONG_TNT_PACKET_LENGTH)) 
@@ -653,7 +658,7 @@ static inline bool parse_long_tnt(pt_packet& packet)
 }
 
 
-static inline bool parse_tip(pt_packet& packet, u64 curr_ip) 
+static inline bool parse_tip(pt_state& state, pt_packet& packet, u64 curr_ip) 
 {
     if(!LEFT(TIP_PACKET_LENGTH))
         return false;
@@ -754,7 +759,7 @@ static std::optional<u8> parse_tip_ip_use(u8 ip_bits)
 }
 
 
-static inline bool parse_pip(pt_packet& packet)
+static inline bool parse_pip(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(PIP_PACKET_LENGTH))
         return false;
@@ -773,7 +778,7 @@ static inline bool parse_pip(pt_packet& packet)
 }
 
 
-static inline bool parse_mode(pt_packet& packet)
+static inline bool parse_mode(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(MODE_PACKET_LENGTH))    
         return false;
@@ -793,7 +798,7 @@ static inline bool parse_mode(pt_packet& packet)
 }
 
 
-static inline bool parse_trace_stop(pt_packet& packet) 
+static inline bool parse_trace_stop(pt_state& state, pt_packet& packet) 
 {
     if(!LEFT(TRACE_STOP_PACKET_LENGTH))
         return false;
@@ -812,7 +817,7 @@ static inline bool parse_trace_stop(pt_packet& packet)
 }
 
 
-static inline bool parse_cbr(pt_packet& packet) 
+static inline bool parse_cbr(pt_state& state, pt_packet& packet) 
 {
     if(!LEFT(CBR_PACKET_LENGTH))
         return false;
@@ -831,7 +836,7 @@ static inline bool parse_cbr(pt_packet& packet)
 }
 
 
-static inline bool parse_tsc(pt_packet& packet) 
+static inline bool parse_tsc(pt_state& state, pt_packet& packet) 
 {
     if(!LEFT(TSC_PACKET_LENGTH))
         return false;
@@ -849,7 +854,7 @@ static inline bool parse_tsc(pt_packet& packet)
 }
 
 
-static inline bool parse_mtc(pt_packet& packet)
+static inline bool parse_mtc(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(MTC_PACKET_LENGTH))
         return false;
@@ -867,7 +872,7 @@ static inline bool parse_mtc(pt_packet& packet)
 }
 
 
-static inline bool parse_tma(pt_packet& packet)
+static inline bool parse_tma(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(TMA_PACKET_LENGTH))
         return false;
@@ -886,7 +891,7 @@ static inline bool parse_tma(pt_packet& packet)
 }
 
 
-static inline bool parse_vmcs(pt_packet& packet)
+static inline bool parse_vmcs(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(VMCS_PACKET_LENGTH))
         return false;
@@ -905,7 +910,7 @@ static inline bool parse_vmcs(pt_packet& packet)
 }
 
 
-static inline bool parse_ovf(pt_packet& packet)
+static inline bool parse_ovf(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(OVF_PACKET_LENGTH))
         return false;
@@ -924,14 +929,14 @@ static inline bool parse_ovf(pt_packet& packet)
 }
 
 
-static inline bool parse_cyc(pt_packet& packet)
+static inline bool parse_cyc(pt_state& state, pt_packet& packet)
 {
     // Todo: implement this
     return false;
 }
 
 
-static inline bool parse_psb(pt_packet& packet)
+static inline bool parse_psb(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(PSB_PACKET_LENGTH))
         return false;
@@ -951,7 +956,7 @@ static inline bool parse_psb(pt_packet& packet)
 }
 
 
-static inline bool parse_psb_end(pt_packet& packet)
+static inline bool parse_psb_end(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(PSB_END_PACKET_LENGTH))
         return false;
@@ -970,7 +975,7 @@ static inline bool parse_psb_end(pt_packet& packet)
 }
 
 
-static inline bool parse_mnt(pt_packet& packet)
+static inline bool parse_mnt(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(MNT_PACKET_LENGTH))
         return false;
@@ -990,7 +995,7 @@ static inline bool parse_mnt(pt_packet& packet)
 }
 
 
-static inline bool parse_pad(pt_packet& packet)
+static inline bool parse_pad(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(PAD_PACKET_LENGTH))   
         return false;
@@ -1008,7 +1013,7 @@ static inline bool parse_pad(pt_packet& packet)
 }
 
 
-static inline bool parse_ptw(pt_packet& packet) 
+static inline bool parse_ptw(pt_state& state, pt_packet& packet) 
 {
     if(!LEFT(PTW_HEADER_LENGTH))
         return false;
@@ -1035,7 +1040,7 @@ static inline bool parse_ptw(pt_packet& packet)
 }
 
 
-static inline bool parse_exstop(pt_packet& packet)
+static inline bool parse_exstop(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(EXSTOP_PACKET_LENGTH))
         return false;
@@ -1054,7 +1059,7 @@ static inline bool parse_exstop(pt_packet& packet)
 }
 
 
-static inline bool parse_mwait(pt_packet& packet)
+static inline bool parse_mwait(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(MWAIT_PACKET_LENGTH))
         return false;
@@ -1073,7 +1078,7 @@ static inline bool parse_mwait(pt_packet& packet)
 }
 
 
-static inline bool parse_pwre(pt_packet& packet)
+static inline bool parse_pwre(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(PWRE_PACKET_LENGTH))
         return false;
@@ -1090,7 +1095,7 @@ static inline bool parse_pwre(pt_packet& packet)
 }
 
 
-static inline bool parse_pwrx(pt_packet& packet)
+static inline bool parse_pwrx(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(PWRX_PACKET_LENGTH))
         return false;
@@ -1109,7 +1114,7 @@ static inline bool parse_pwrx(pt_packet& packet)
 }
 
 
-static inline bool parse_bbp(pt_packet& packet)
+static inline bool parse_bbp(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(BBP_PACKET_LENGTH))
         return false;
@@ -1128,14 +1133,14 @@ static inline bool parse_bbp(pt_packet& packet)
 }
 
 
-static inline bool parse_bip(pt_packet& packet)
+static inline bool parse_bip(pt_state& state, pt_packet& packet)
 {
     // Todo implement
     return false;
 }
 
 
-static inline bool parse_bep(pt_packet& packet)
+static inline bool parse_bep(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(BEP_PACKET_LENGTH))
         return false;
@@ -1154,7 +1159,7 @@ static inline bool parse_bep(pt_packet& packet)
 }
 
 
-static inline bool parse_cfe(pt_packet& packet)
+static inline bool parse_cfe(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(CFE_PACKET_LENGTH))
         return false;
@@ -1173,7 +1178,7 @@ static inline bool parse_cfe(pt_packet& packet)
 }
 
 
-static inline bool parse_evd(pt_packet& packet)
+static inline bool parse_evd(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(EVD_PACKET_LENGTH))
         return false;
@@ -1192,7 +1197,7 @@ static inline bool parse_evd(pt_packet& packet)
 }
 
 
-static inline void parse_unkown(pt_packet& packet)
+static inline void parse_unkown(pt_state& state, pt_packet& packet)
 {
     u8 byte;
     GET_BYTES(&byte, 1);
@@ -1329,48 +1334,48 @@ static void print_tnt(const pt_packet& packet)
 
 
 /* ***** File Management ***** */
-static void load_trace_file(char *file_name)
+static void load_trace_file(pt_state& state, char *file_name)
 {
-    trace_data = fopen(file_name, "rb");
+    state.trace_data = fopen(file_name, "rb");
 
-    if(trace_data == NULL) {
+    if(state.trace_data == NULL) {
         fprintf(stderr, "Failed to open data file: %s\n", file_name);
         exit(EXIT_FAILURE);
     }
 
     // Get length of the file 
-    fseek(trace_data, 0L, SEEK_END);
-    size = ftell(trace_data);
-    fseek(trace_data, 0L, SEEK_SET);
+    fseek(state.trace_data, 0L, SEEK_END);
+    state.size = ftell(state.trace_data);
+    fseek(state.trace_data, 0L, SEEK_SET);
 
-    offset = 0;
+    state.offset = 0;
 
-    __load_data_into_buffer();
+    __load_data_into_buffer(state);
 }
 
 
-static void __advance(u8 n)
+static void __advance(pt_state& state, u8 n)
 {
-    offset += n; // Track global pos 
+    state.offset += n; // Track global pos 
     _pos_in_buffer += n; // Track local pos 
 
     if(_pos_in_buffer < BUFFER_SIZE) return;
 
-    __load_data_into_buffer();
+    __load_data_into_buffer(state);
 }
 
 
-static void __get_bytes(u8 *buffer, u8 n)
+static void __get_bytes(pt_state& state, u8 *buffer, u8 n)
 {
     if(_pos_in_buffer + n >= BUFFER_SIZE) {  
-        __load_data_into_buffer();
+        __load_data_into_buffer(state);
     }
 
     memcpy(buffer, _buffer + _pos_in_buffer, n);
 }
 
 
-static void __load_data_into_buffer(void)
+static void __load_data_into_buffer(pt_state& state)
 {
     size_t old_data = (_pos_in_buffer == 0) ? 
         0 : BUFFER_SIZE - _pos_in_buffer; 
@@ -1383,7 +1388,7 @@ static void __load_data_into_buffer(void)
 
     size_t new_data = BUFFER_SIZE - old_data;
 
-    fread(_buffer + old_data, new_data, 1, trace_data);
+    fread(_buffer + old_data, new_data, 1, state.trace_data);
 
     _pos_in_buffer = 0; // Reset local position
 }
@@ -1410,27 +1415,27 @@ static void load_mapping_file(char *file_name)
 }
 
 
-static unsigned long get_mapping(unsigned long host_pc) 
+static u64 get_mapping(u64 host_pc) 
 {
     return host_ip_to_guest_ip[host_pc];   
 }
 
 
-static void load_output_file(char *file_name)
+static void load_output_file(pt_state& state, char *file_name)
 {
-    out_file = fopen(file_name, "w+");
+    state.out_file = fopen(file_name, "w+");
 
-    if(out_file == NULL) {
+    if(state.out_file == NULL) {
         fprintf(stderr, "Failed to open trace output file: %s\n", file_name);
         exit(EXIT_FAILURE);
     }
 }
 
 
-static void log_basic_block(unsigned long id) 
+static void log_basic_block(pt_state& state, u64 id) 
 {
-    if(previous_ip != 0) {
-        fprintf(out_file, "%lX\n", previous_ip);
+    if(state.previous_guest_ip != 0) {
+        fprintf(state.out_file, "%lX\n", state.previous_guest_ip);
     } 
-    previous_ip = id;
+    state.previous_guest_ip = id;
 }

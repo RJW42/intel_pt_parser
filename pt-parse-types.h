@@ -2,6 +2,7 @@
 #define PT_PARSE_TYPES_H_
 
 #include "types.h"
+#include "asm-types.h"
 
 #include <stdbool.h>
 
@@ -132,6 +133,9 @@ struct pt_state {
     /* The current instruction poitner (ip) value */
     u64 current_ip;
 
+    /* The last guest ip found */
+    u64 previous_guest_ip;
+
     /* Store the last TIP ip value. This is used for 
      * for generating the next value */
     u64 last_tip_ip;
@@ -193,8 +197,24 @@ struct pt_state {
      * reached by u_jump*/
     bool last_ip_was_reached_by_tip;
 
+    /* The file to output the trace too */
+    FILE* out_file;
+
+    /* The file to read the pt data from */
+    FILE* trace_data;
+
+    /* Track the amount of data needing to be parced*/
+    u64 size;
+
+    /* Tracck the current offset in the trace file */
+    u64 offset;
+
+    /* Store the current state of the assembly code */
+    asm_state asm_parsing_state;
+
     pt_state() : 
         current_ip(0),
+        previous_guest_ip(0),
         last_tip_ip(0),
         qemu_caller_ip(0),
         qemu_return_ip(0),
@@ -211,7 +231,11 @@ struct pt_state {
         next_tip_is_breakpoint(false),
         last_ip_was_reached_by_u_jump(false),
         last_ip_had_mapping(false),
-        last_ip_was_reached_by_tip(false) {};
+        last_ip_was_reached_by_tip(false),
+        out_file(NULL),
+        trace_data(NULL),
+        size(0),
+        offset(0) {};
 };
 
 #endif
