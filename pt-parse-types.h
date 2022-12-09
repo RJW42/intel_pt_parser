@@ -181,6 +181,18 @@ struct pt_state {
     /* Keeps track if the last tnt lead to a call to the breakpoint */
     bool next_tip_is_breakpoint;
 
+    /* Keep track if the last ip that was reached by following an un
+     * -conditional jump. We need to know this as qemu may send us a
+     * fup that takes us back in time */
+    bool last_ip_was_reached_by_u_jump;
+
+    /* Ip used for the situation described above */
+    bool last_ip_had_mapping;
+
+    /* We need to store this for a simmilar reason to the last ip 
+     * reached by u_jump*/
+    bool last_ip_was_reached_by_tip;
+
     pt_state() : 
         current_ip(0),
         last_tip_ip(0),
@@ -189,13 +201,17 @@ struct pt_state {
         pad_count(0), 
         breakpoint_ip(0),
         breakpoint_return_ip(0),
+        last_packet(NULL),
         in_psb(false),
         in_fup(false),
         last_was_mode(false),
         last_was_ovf(false),
         tracing_jit_code(false),
         last_tip_was_breakpoint(false),
-        next_tip_is_breakpoint(false) {};
+        next_tip_is_breakpoint(false),
+        last_ip_was_reached_by_u_jump(false),
+        last_ip_had_mapping(false),
+        last_ip_was_reached_by_tip(false) {};
 };
 
 #endif

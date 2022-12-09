@@ -25,14 +25,15 @@ static u64 size;
 static std::unordered_map<u64, u64> host_ip_to_guest_ip;
 static bool use_asm;
 
-// #define DEBUG_MODE_
+static u64 previous_ip = 0;
+
+//#define DEBUG_MODE_
 #define DEBUG_TIME_
 
 #ifdef DEBUG_MODE_ 
 #define printf_debug(...); printf(__VA_ARGS__);
 #else 
 #define printf_debug(...);
-
 #endif
 
 #define BYTE_TO_BINARY_PATTERN "%c%c%c%c%c%c%c%c"
@@ -46,7 +47,7 @@ static bool use_asm;
   (byte & 0x02 ? '1' : '0'), \
   (byte & 0x01 ? '1' : '0') 
 
-#define BUFFER_SIZE 65536
+#define BUFFER_SIZE 1073741824
 
 static u8 _buffer[BUFFER_SIZE];
 static u32 _pos_in_buffer = 0;
@@ -68,11 +69,9 @@ static void __load_data_into_buffer(void);
 #define MIDDLE_BITS(value, uppwer, lower) (value & (((1 << uppwer) - 1) << lower))
 
 #define RETURN_IF(x) \
-    packet = x(); \
-    if(packet) return *packet
+    if(x(packet)) return packet
 #define RETURN_IF_2(x, y) \
-    packet = x(y); \
-    if(packet) return *packet
+    if(x(packet, y)) return packet
 
 int main() 
 {
@@ -92,7 +91,15 @@ int main()
     
     parse();
 
+    if(previous_ip != 0) {
+        // Record the lat basic block which may have 
+        // not been saved yet
+        log_basic_block(previous_ip);
+    }
+
     fclose(out_file);
+
+    return 0;
 }
 
 
@@ -104,21 +111,10 @@ void parse(void)
 #endif
     pt_state state; 
 
-#ifdef DEBUG_TIME_
-    u8 last_percentage = -1;
-#endif
+    std::optional<pt_packet> maybe_packet;
 
-
-    while(offset < size) {
-#ifdef DEBUG_TIME_
-        if((u8)(((double)offset / size) * 100) != last_percentage) {
-            last_percentage = ((double)offset / size) * 100;
-            printf("TIME: %u%%\n", last_percentage);
-        }
-#endif
-
-        // Get the next packet
-        pt_packet packet = get_next_packet(state.last_tip_ip);
+    while((maybe_packet = try_get_next_packet())) {
+        pt_packet packet = *maybe_packet;
 
         if(packet.type == PAD) {
             // No need to track PAD packets as they do not
@@ -166,6 +162,9 @@ void parse(void)
 
 static inline void handle_tip(pt_state& state) 
 {
+    bool update_ip = true; 
+    bool was_in_fup = false;
+
     tip_packet_data *tip_data = &state.last_packet->tip_data;
 
     state.last_tip_was_breakpoint = 
@@ -210,6 +209,19 @@ static inline void handle_tip(pt_state& state)
         // We have found an a PGD packet which binds to the 
         // previous FUP packet 
         state.in_fup = false;
+        was_in_fup = true;
+    }
+
+    if((state.last_ip_was_reached_by_u_jump &&
+       state.last_ip_had_mapping && (state.in_psb || state.in_fup)) || (
+        was_in_fup && state.last_ip_had_mapping && 
+        state.last_tip_ip == tip_data->ip && 
+        state.last_tip_ip == state.current_ip
+       )) {
+        // Want to remove the last ip from the record has we will
+        // reach it again. This may not be entierly true tbh 
+        printf_debug("  NOTE: Removing previous block from save\n");
+        previous_ip = 0;
     }
 
     if(state.in_fup) { // Cannot update current ip
@@ -217,13 +229,25 @@ static inline void handle_tip(pt_state& state)
         return;
     }
 
+    if(state.current_ip == tip_data->ip && 
+       state.last_tip_ip == state.current_ip && 
+       tip_data->type == TIP_FUP && state.in_psb) {
+        // We have resived a refresh of the current ip, but it 
+        // is the same as the current. This will cuase a log to 
+        // occour twice, we don't want that. 
+        update_ip = false;
+    }
+
 
     // Can update the current ip 
-    state.last_tip_ip = tip_data->ip;
-    update_current_ip(state, tip_data->ip);
+    if(update_ip) {
+        state.last_tip_ip = tip_data->ip;
+        update_current_ip(state, tip_data->ip);
+    }
 
 
-    if(tip_data->ip == state.qemu_caller_ip && state.qemu_return_ip == 0) {
+    if(tip_data->ip == state.qemu_caller_ip && 
+       state.qemu_return_ip == 0 && use_asm) {
         // If we have just set the qemu_caller_ip, after updating the 
         // current ip the first basic block of asm will be parsed 
         // we can use this to get the qemu_return_ip, jumped to prior to 
@@ -276,6 +300,8 @@ static inline void follow_asm(pt_state& state)
         // can return from this breakpoint call
         state.last_tip_was_breakpoint = false;
 
+        state.last_ip_was_reached_by_u_jump = false;
+
         update_current_ip(
             state, state.breakpoint_return_ip
         );
@@ -317,6 +343,12 @@ static inline void follow_asm(pt_state& state)
             update_current_ip(
                 state, instr.des
             );
+
+            // Set this to help us back track in the event
+            // that a psb-fup-psbend event is sent inbetween 
+            // an unconditional jump and the next real-packet 
+            state.last_ip_was_reached_by_u_jump = true;
+            
             break;
         case PT_JXX: // Follow this conditional jump
             if(!has_tnt || tnt_packet_p >= tnt_packet->size) {
@@ -324,6 +356,10 @@ static inline void follow_asm(pt_state& state)
                 can_continue = false;
                 break;
             }
+
+            // If we do/don't take a conditional jump
+            // that still updates the ip resetting the u_jump status
+            state.last_ip_was_reached_by_u_jump = false;
 
             if(!tnt_packet->tnt[tnt_packet_p++]) {
                 // Conditional jump is not taken
@@ -397,8 +433,10 @@ static inline void update_current_ip(
 ) {
     state.current_ip = ip;
 
+    state.last_ip_was_reached_by_u_jump = false; // reset 
+
     // Check if we can advance the asm
-    if(state.current_ip == state.qemu_caller_ip) {
+    if(state.current_ip == state.qemu_caller_ip && use_asm) {
         advance_to_ipt_start();
     }
 
@@ -407,6 +445,8 @@ static inline void update_current_ip(
 
     // Check if this ip maps to a basic block
     u64 guest_ip = get_mapping(state.current_ip);
+
+    state.last_ip_had_mapping = guest_ip != 0;
 
     if(guest_ip == 0) 
         return; // Doesn't map nothng more to do 
@@ -419,10 +459,10 @@ static inline void update_current_ip(
         state.current_ip, guest_ip
     );
 
-    if(!state.tracing_jit_code) {
+    if(!state.tracing_jit_code && use_asm) {
         printf(
             "    Error: The block containing the above ip"
-            " has not been translated\n"
+            " has not been translated: 0x%lx\n", guest_ip
         );
         exit(EXIT_FAILURE);
     }   
@@ -463,7 +503,7 @@ static inline pt_instruction_type jit_to_pt_instr_type(
 
 
 
-static inline void print_packet_debug(pt_packet packet, pt_state& state)
+static inline void print_packet_debug(pt_packet& packet, pt_state& state)
 {
 #ifdef DEBUG_MODE_
     if(state.pad_count > 0) {
@@ -475,12 +515,52 @@ static inline void print_packet_debug(pt_packet packet, pt_state& state)
 #endif
 }
 
+/* ***** Concurrent Parsing ***** */
+static std::optional<pt_packet> try_get_next_packet(void)
+{
+#ifdef DEBUG_TIME_
+    static u8 last_percentage = -1;
+#endif
+    static u64 last_tip_ip = 0;
+
+#ifdef DEBUG_MODE_
+    u64 old_offset = offset;
+#endif
+
+    if(offset >= size) {
+        // No more packets
+        return std::nullopt;
+    }
+
+#ifdef DEBUG_TIME_
+    if((u8)(((double)offset / size) * 100) != last_percentage) {
+        last_percentage = ((double)offset / size) * 100;
+        fprintf(stderr, "TIME: %u%%\n", last_percentage);
+        printf("TIME: %u%%\n", last_percentage);
+    }
+#endif
+
+    pt_packet packet = get_next_packet(last_tip_ip);
+
+#ifdef DEBUG_MODE_
+    if(packet.type != PAD) printf("OFST: %u: ", old_offset);
+#endif
+
+    if(packet.type == TIP) {
+        last_tip_ip = packet.tip_data.ip;
+    }
+
+    return { packet };
+}
+
 
 /* ***** Parsing ***** */
-static pt_packet get_next_packet(u64 curr_ip)
+static inline pt_packet get_next_packet(u64 curr_ip)
 {
-    std::optional<pt_packet> packet;
+    pt_packet packet(UNKOWN); // Todo: rename unknown 
     
+    RETURN_IF(parse_psb);
+    RETURN_IF(parse_psb_end);
     RETURN_IF(parse_short_tnt);
     RETURN_IF(parse_long_tnt);
     RETURN_IF_2(parse_tip, curr_ip);
@@ -494,8 +574,6 @@ static pt_packet get_next_packet(u64 curr_ip)
     RETURN_IF(parse_vmcs);
     RETURN_IF(parse_ovf);
     RETURN_IF(parse_cyc);
-    RETURN_IF(parse_psb);
-    RETURN_IF(parse_psb_end);
     RETURN_IF(parse_mnt);
     RETURN_IF(parse_pad);
     RETURN_IF(parse_ptw);
@@ -509,21 +587,23 @@ static pt_packet get_next_packet(u64 curr_ip)
     RETURN_IF(parse_cfe);
     RETURN_IF(parse_evd);
 
-    return parse_unkown();
+    parse_unkown(packet);
+
+    return packet;
 }
 
 
-static std::optional<pt_packet> parse_short_tnt(void)
+static inline bool parse_short_tnt(pt_packet& packet)
 {
     // Attempt to pase a short TNT packet
     if(!LEFT(SHORT_TNT_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
     
     u8 byte;
     GET_BYTES(&byte, 1);
 
     if(LOWER_BITS(byte, 1) != 0) 
-        return std::nullopt;
+        return false;
 
     int start_bit = 6;
 
@@ -533,10 +613,10 @@ static std::optional<pt_packet> parse_short_tnt(void)
         }
     }
 
-    if(start_bit == 0) return std::nullopt;
+    if(start_bit == 0) return false;
 
     // Is Short TNT packet. Parse it's data
-    tnt_packet_data data;
+    tnt_packet_data& data = packet.tnt_data;
     data.size = start_bit;
 
     for(int i = start_bit - 1; i >= 0; i--) {
@@ -545,20 +625,23 @@ static std::optional<pt_packet> parse_short_tnt(void)
     }
     
     ADVANCE(1);
-    return { pt_packet(data) };
+
+    packet.type = TNT;
+
+    return true;
 }
 
-static std::optional<pt_packet> parse_long_tnt(void)
+static inline bool parse_long_tnt(pt_packet& packet)
 {
      // Attempt to parse a Long TNT packet 
     if(!LEFT(LONG_TNT_PACKET_LENGTH)) 
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, LONG_TNT_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE || 
        buffer[1] != LONG_TNT_OPPCODE) 
-        return std::nullopt;
+        return false;
 
     printf("LONG TNT NOT IMPLEMENTED\n");
     exit(EXIT_FAILURE);
@@ -566,33 +649,34 @@ static std::optional<pt_packet> parse_long_tnt(void)
     ADVANCE(LONG_TNT_PACKET_LENGTH);
 
     // TODO: implement 
-    return {};
+    return false;
 }
 
 
-static std::optional<pt_packet> parse_tip(u64 curr_ip) 
+static inline bool parse_tip(pt_packet& packet, u64 curr_ip) 
 {
     if(!LEFT(TIP_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, TIP_PACKET_LENGTH);
 
     // Get the type of this packet 
     auto type = parse_tip_type(buffer);
 
-    if(!type) return std::nullopt;
+    if(!type) return false;
 
     // Check if the ip is within context
     u8 ip_bits = buffer[0] >> 5;
 
     if(ip_bits == 0b000) {
         ADVANCE(1);
-        return { pt_packet(TIP_OUT_OF_CONTEXT) };
+        packet.type = TIP_OUT_OF_CONTEXT;
+        return true;
     }
 
     // ip in context get compression status
     auto last_ip_use = parse_tip_ip_use(ip_bits);
-    if(!last_ip_use) return std::nullopt;
+    if(!last_ip_use) return false;
 
     // Create ip buffer
     u64 ip_buffer = 0;
@@ -609,12 +693,15 @@ static std::optional<pt_packet> parse_tip(u64 curr_ip)
             ip_buffer = (ip_buffer << 8) | byte;
     }
 
-    tip_packet_data data(*type, ip_bits, *last_ip_use, ip_buffer, ip);
-
     // Finished return packet
     ADVANCE(TIP_PACKET_LENGTH - *last_ip_use);
 
-    return {pt_packet(data)};
+    packet.tip_data = tip_packet_data(
+        *type, ip_bits, *last_ip_use, ip_buffer, ip
+    );
+    packet.type = TIP;
+
+    return true;
 }  
 
 
@@ -667,409 +754,452 @@ static std::optional<u8> parse_tip_ip_use(u8 ip_bits)
 }
 
 
-static std::optional<pt_packet> parse_pip(void)
+static inline bool parse_pip(pt_packet& packet)
 {
     if(!LEFT(PIP_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
     
     INIT_BUFFER(buffer, PIP_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE ||
        buffer[1] != PIP_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(PIP_PACKET_LENGTH);
 
-    return { pt_packet(PIP) };
+    packet.type = PIP;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_mode(void)
+static inline bool parse_mode(pt_packet& packet)
 {
     if(!LEFT(MODE_PACKET_LENGTH))    
-        return std::nullopt;
+        return false;
     
     INIT_BUFFER(buffer, MODE_PACKET_LENGTH);
 
     if(buffer[0] != MODE_OPPCODE)
-        return std::nullopt;
+        return false;
 
     // Todo: Parse the two different types of mode
 
     ADVANCE(MODE_PACKET_LENGTH);
 
-    return { pt_packet(MODE) };
+    packet.type = MODE;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_trace_stop(void) 
+static inline bool parse_trace_stop(pt_packet& packet) 
 {
     if(!LEFT(TRACE_STOP_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, TRACE_STOP_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE || 
        buffer[1] != TRACE_STOP_OPPCODE)
-        return std::nullopt;
+        return false;
     
     ADVANCE(TRACE_STOP_PACKET_LENGTH);
 
-    return { pt_packet(TRACE_STOP) };
+    packet.type = TRACE_STOP;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_cbr(void) 
+static inline bool parse_cbr(pt_packet& packet) 
 {
     if(!LEFT(CBR_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, CBR_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE || 
        buffer[1] != CBR_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(CBR_PACKET_LENGTH);
 
-    return { pt_packet(CBR) };
+    packet.type = CBR;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_tsc(void) 
+static inline bool parse_tsc(pt_packet& packet) 
 {
     if(!LEFT(TSC_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, TSC_PACKET_LENGTH);
 
     if(buffer[0] != TSC_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(TSC_PACKET_LENGTH);
 
-    return { pt_packet(TSC) };
+    packet.type = TSC;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_mtc(void)
+static inline bool parse_mtc(pt_packet& packet)
 {
     if(!LEFT(MTC_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, MTC_PACKET_LENGTH);
 
     if(buffer[0] != MTC_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(TSC_PACKET_LENGTH);
 
-    return { pt_packet(MTC) };
+    packet.type = MTC;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_tma(void)
+static inline bool parse_tma(pt_packet& packet)
 {
     if(!LEFT(TMA_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, TMA_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE || 
        buffer[1] != TMA_OPPCODE) 
-        return std::nullopt;
+        return false;
     
     ADVANCE(TMA_PACKET_LENGTH);
 
-    return { pt_packet(TMA) };
+    packet.type = TMA;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_vmcs(void)
+static inline bool parse_vmcs(pt_packet& packet)
 {
     if(!LEFT(VMCS_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, VMCS_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE || 
        buffer[1] != VMCS_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(VMCS_PACKET_LENGTH);
 
-    return { pt_packet(VMCS) };
+    packet.type = VMCS;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_ovf(void)
+static inline bool parse_ovf(pt_packet& packet)
 {
     if(!LEFT(OVF_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, OVF_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE || 
        buffer[1] != OVF_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(OVF_PACKET_LENGTH);
 
-    return { pt_packet(OVF) };
+    packet.type = OVF;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_cyc(void)
+static inline bool parse_cyc(pt_packet& packet)
 {
     // Todo: implement this
-    return std::nullopt;
+    return false;
 }
 
 
-static std::optional<pt_packet> parse_psb(void)
+static inline bool parse_psb(pt_packet& packet)
 {
     if(!LEFT(PSB_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, PSB_PACKET_LENGTH);
 
     char expected_buffer[] = PSB_PACKET_FULL;
 
     if(memcmp(buffer, expected_buffer, PSB_PACKET_LENGTH) != 0)
-        return std::nullopt;
+        return false;
 
     ADVANCE(PSB_PACKET_LENGTH);
 
-    return { pt_packet(PSB) };
+    packet.type = PSB;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_psb_end(void)
+static inline bool parse_psb_end(pt_packet& packet)
 {
     if(!LEFT(PSB_END_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, PSB_END_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE || 
        buffer[1] != PSB_END_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(PSB_END_PACKET_LENGTH);
 
-    return { pt_packet(PSBEND) };
+    packet.type = PSBEND;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_mnt(void)
+static inline bool parse_mnt(pt_packet& packet)
 {
     if(!LEFT(MNT_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, MNT_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE || 
        buffer[1] != MNT_OPPCODE_1 || 
        buffer[2] != MNT_OPPCODE_2)
-        return std::nullopt;
+        return false;
 
     ADVANCE(MNT_PACKET_LENGTH);
 
-    return { pt_packet(MNT) };
+    packet.type = MNT;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_pad(void)
+static inline bool parse_pad(pt_packet& packet)
 {
     if(!LEFT(PAD_PACKET_LENGTH))   
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, PAD_PACKET_LENGTH);
 
     if(buffer[0] != PAD_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(PAD_PACKET_LENGTH);
 
-    return { pt_packet(PAD) };
+    packet.type = PAD;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_ptw(void) 
+static inline bool parse_ptw(pt_packet& packet) 
 {
     if(!LEFT(PTW_HEADER_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(header, PTW_HEADER_LENGTH);
 
     if(header[0] != OPPCODE_STARTING_BYTE && 
        LOWER_BITS(header[1], 5) != PTW_OPPCODE)
-        return std::nullopt;
+        return false;
 
     unsigned char payload_bits = MIDDLE_BITS(header[1], 7, 5);
 
     if(payload_bits != PTW_L1_CODE && payload_bits != PTW_L2_CODE)
-        return std::nullopt;
+        return false;
 
     unsigned char packet_length = PTW_HEADER_LENGTH + 
         (payload_bits == PTW_L1_CODE) ? PTW_BODY_LENGTH_1 : PTW_BODY_LENGTH_2;
 
     ADVANCE(packet_length);
 
-    return { pt_packet(PTW) };
+    packet.type = PTW;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_exstop(void)
+static inline bool parse_exstop(pt_packet& packet)
 {
     if(!LEFT(EXSTOP_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, EXSTOP_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE ||
        LOWER_BITS(buffer[1], 7) != EXSTOP_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(EXSTOP_PACKET_LENGTH);
 
-    return { pt_packet(EXSTOP) };
+    packet.type = EXSTOP;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_mwait(void)
+static inline bool parse_mwait(pt_packet& packet)
 {
     if(!LEFT(MWAIT_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
     
     INIT_BUFFER(buffer, MWAIT_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE ||
        buffer[1] != MWAIT_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(MWAIT_PACKET_LENGTH);
 
-    return { pt_packet(MWAIT) };
+    packet.type = MWAIT;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_pwre(void)
+static inline bool parse_pwre(pt_packet& packet)
 {
     if(!LEFT(PWRE_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
     
     INIT_BUFFER(buffer, PWRE_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE ||
        buffer[1] != PWRE_OPPCODE)
-        return std::nullopt;
+        return false;
 
-    ADVANCE(PWRE_PACKET_LENGTH);
+    packet.type = PWRE;
 
-    return { pt_packet(PWRE) };
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_pwrx(void)
+static inline bool parse_pwrx(pt_packet& packet)
 {
     if(!LEFT(PWRX_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
     
     INIT_BUFFER(buffer, PWRX_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE ||
        buffer[1] != PWRX_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(PWRX_PACKET_LENGTH);
 
-    return { pt_packet(PWRX) };
+    packet.type = PWRX;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_bbp(void)
+static inline bool parse_bbp(pt_packet& packet)
 {
     if(!LEFT(BBP_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
     
     INIT_BUFFER(buffer, BBP_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE ||
        buffer[1] != BBP_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(BBP_PACKET_LENGTH);
 
-    return { pt_packet(BBP) };
+    packet.type = BBP;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_bip(void)
+static inline bool parse_bip(pt_packet& packet)
 {
     // Todo implement
-    return std::nullopt;
+    return false;
 }
 
 
-static std::optional<pt_packet> parse_bep(void)
+static inline bool parse_bep(pt_packet& packet)
 {
     if(!LEFT(BEP_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
 
     INIT_BUFFER(buffer, BEP_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE ||
        LOWER_BITS(buffer[1], 7) != BEP_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(BEP_PACKET_LENGTH);
 
-    return { pt_packet(BEP) };
+    packet.type = BEP;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_cfe(void)
+static inline bool parse_cfe(pt_packet& packet)
 {
     if(!LEFT(CFE_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
     
     INIT_BUFFER(buffer, CFE_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE ||
        buffer[1] != CFE_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(CFE_PACKET_LENGTH);
 
-    return { pt_packet(CFE) };
+    packet.type = CFE;
+
+    return true;
 }
 
 
-static std::optional<pt_packet> parse_evd(void)
+static inline bool parse_evd(pt_packet& packet)
 {
     if(!LEFT(EVD_PACKET_LENGTH))
-        return std::nullopt;
+        return false;
     
     INIT_BUFFER(buffer, EVD_PACKET_LENGTH);
 
     if(buffer[0] != OPPCODE_STARTING_BYTE ||
        buffer[1] != EVD_OPPCODE)
-        return std::nullopt;
+        return false;
 
     ADVANCE(EVD_PACKET_LENGTH);
 
-    return { pt_packet(EVD) };
+    packet.type = EVD;    
+
+    return  true;
 }
 
 
-static pt_packet parse_unkown(void)
+static inline void parse_unkown(pt_packet& packet)
 {
     u8 byte;
     GET_BYTES(&byte, 1);
     ADVANCE(1);
 
-    return pt_packet(unkown_packet_data(byte));
+    packet.type = UNKOWN;
+    packet.unkown_data = unkown_packet_data(byte);
 }
 
 /* ***** Debugging ***** */
@@ -1158,7 +1288,10 @@ static void print_packet(const pt_packet& packet)
         printf("EVD\n");
         break;
     case UNKOWN:
-        printf("UNKOWN: " BYTE_TO_BINARY_PATTERN "\n", BYTE_TO_BINARY(packet.unkown_data.byte));
+        printf(
+            "UNKOWN: " BYTE_TO_BINARY_PATTERN "\n", 
+            BYTE_TO_BINARY(packet.unkown_data.byte)
+        );
         break;
     }
 }
@@ -1229,7 +1362,7 @@ static void __advance(u8 n)
 
 static void __get_bytes(u8 *buffer, u8 n)
 {
-    if(_pos_in_buffer + n > BUFFER_SIZE) {  
+    if(_pos_in_buffer + n >= BUFFER_SIZE) {  
         __load_data_into_buffer();
     }
 
@@ -1296,5 +1429,8 @@ static void load_output_file(char *file_name)
 
 static void log_basic_block(unsigned long id) 
 {
-    fprintf(out_file, "%lX\n", id);
+    if(previous_ip != 0) {
+        fprintf(out_file, "%lX\n", previous_ip);
+    } 
+    previous_ip = id;
 }

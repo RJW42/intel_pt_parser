@@ -14,11 +14,13 @@
 
 #include <chrono>
 
-// #define ASM_PARSE_DEBUG_
+#define ASM_PARSE_DEBUG_
 
 static std::ifstream asm_file;
 static std::map<u64, jit_asm_instruction*> instructions;
 static std::map<u64, basic_block*> blocks;
+
+static u64 start_count = 0;
 
 void asm_init(const char* asm_file_name) 
 {
@@ -40,6 +42,9 @@ jit_asm_instruction* get_next_jit_instr(u64 current_ip)
 
         if(block == blocks.begin() || 
           (current_ip > (--block)->second->end_ip)) {
+            fprintf(
+                stderr, "Error: Failed to find block for: 0x%lX\n", current_ip
+            ); 
             printf(
                 "Error: Failed to find block for: 0x%lX\n", current_ip
             ); 
@@ -55,6 +60,9 @@ jit_asm_instruction* get_next_jit_instr(u64 current_ip)
     if(instr == current_block->instructions.end()) {
         printf(
             "Errror: Failed to find next instruction for: 0x%lX\n", current_ip
+        ); 
+        fprintf(
+                stderr, "Errror: Failed to find next instruction for: 0x%lX\n", current_ip
         ); 
         //exit(EXIT_FAILURE);
         return NULL;
@@ -258,7 +266,7 @@ static inline void print_trace_element(trace_element& elmnt){
             << std::endl;
         break;
     case IPT_START:
-        printf("IPT_START:\n\n");
+        printf("IPT_START: %lu\n\n", start_count++);
         break;
     case IPT_STOP:
         break;
@@ -271,7 +279,8 @@ static inline bool parse_trace_element(std::string& l, trace_element& o)
     PARSE_ELEMENT(block, l, o);
     PARSE_ELEMENT(block_size, l, o);
     PARSE_ELEMENT(jmp, l, o);
-    PARSE_ELEMENT(jxx, l, o);
+    PARSE_ELEMENT(jxx1, l, o);
+    PARSE_ELEMENT(jxx2, l, o);
     PARSE_ELEMENT(update, l, o);
     PARSE_ELEMENT(label, l, o);
     PARSE_ELEMENT(ipt_start, l, o);
@@ -321,13 +330,13 @@ static inline bool parse_jmp(std::string& line, trace_element& out)
 }
 
 
-static inline bool parse_jxx(std::string& line, trace_element& out)
+static inline bool parse_jxx1(std::string& line, trace_element& out)
 {
     using namespace std;
-    if(!line.starts_with("JXX: 0x")) return false;
+    if(!line.starts_with("JXX1: 0x")) return false;
     // JXX: 0x... .
 
-    u32 pos = 7;
+    u32 pos = 8;
     
     out.type = JXX;
     out.jxx.loc = parse_ip(line, pos); 
@@ -335,6 +344,27 @@ static inline bool parse_jxx(std::string& line, trace_element& out)
 
     return true;
 }
+
+
+
+static inline bool parse_jxx2(std::string& line, trace_element& out)
+{
+    using namespace std;
+    if(!line.starts_with("JXX2: 0x")) return false;
+    // JXX: 0x... 0x...
+
+    u32 pos = 8;
+    
+    out.type = JXX_LDST;
+    out.jxx_ldst.loc = parse_ip(line, pos); 
+    
+    pos += 2;
+
+    out.jxx_ldst.des = parse_ip(line, pos);
+
+    return true;
+}
+
 
 static inline bool parse_jxx_ldst(std::string& line, trace_element& out)
 {
@@ -428,10 +458,10 @@ static inline bool parse_ipt_stop(std::string& line, trace_element& out)
 static inline bool parse_block_size(std::string& line, trace_element& out)
 {
     if(!line.starts_with("BLOCK_SIZE: ")) return false;
-    line.erase(0, 12);
+    u32 pos = 12;
 
     out.type = BLOCK_SIZE;
-    out.block_size = stol(line);
+    out.block_size = parse_id(line, pos);
 
     return true;
 }
