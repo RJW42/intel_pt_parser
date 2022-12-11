@@ -2,17 +2,16 @@
 #define ASM_PARSE_H_
 
 #include "types.h"
+#include "asm-types.h"
 
-struct jmp {
-    // Todo: need to add conditoinal or not boolean
-    u64 loc;
-    u64 des;
-    bool conditional;
-};
 
-void asm_init(const char* asm_file_name);
-void advance_to_mode(void);
+void asm_init(asm_state& state, const char* asm_file_name);
+void advance_to_ipt_start(asm_state& state);
 
-jmp get_next_jmp(u64 current_ip);
+jit_asm_instruction* get_next_jit_instr(
+    asm_state& state, u64 current_ip
+);
+u64 get_last_jmp_loc(asm_state& state);
+bool ip_inside_block(asm_state& state, u64 ip);
 
 #endif

@@ -2,6 +2,7 @@
 
 #include "asm-parse.h"
 
+#include "pt-parse-types.h"
 #include "pt-parse-internal.h"
 #include "pt-parse-oppcode.h"
 
@@ -14,15 +15,21 @@
 #include <unordered_map>
 #include <iostream>
 #include <ostream>
+#include <optional>
+#include <stack>
 
-static FILE* out_file;
-static FILE* trace_data;
-static u64 offset;
-static u64 size;
+
 static std::unordered_map<u64, u64> host_ip_to_guest_ip;
 static bool use_asm;
 
 #define DEBUG_MODE_
+#define DEBUG_TIME_
+
+#ifdef DEBUG_MODE_ 
+#define printf_debug(...); printf(__VA_ARGS__);
+#else 
+#define printf_debug(...);
+#endif
 
 #define BYTE_TO_BINARY_PATTERN "%c%c%c%c%c%c%c%c"
 #define BYTE_TO_BINARY(byte)  \
@@ -35,259 +42,613 @@ static bool use_asm;
   (byte & 0x02 ? '1' : '0'), \
   (byte & 0x01 ? '1' : '0') 
 
+#define BUFFER_SIZE 1073741824
 
-#define LEFT(n) ((size - offset) >= n) // TODO: Check this >=
-#define ADVANCE(n) offset += n
-#define REVERT(n) offset -= n
-#define GET_BYTES(buffer, size) do {\
-    fseek(trace_data, offset, SEEK_SET); \
-    fread(buffer, size, 1, trace_data); \
-}while(0)
+static u8 _buffer[BUFFER_SIZE];
+static u32 _pos_in_buffer = 0;
+
+static void __advance(pt_state& state, u8 n);
+static void __get_bytes(pt_state& state, u8 *buffer, u8 n);
+static void __load_data_into_buffer(pt_state& state);
+
+#define LEFT(n) ((state.size - state.offset) >= n)
+#define ADVANCE(n) __advance(state, n)
+#define GET_BYTES(buffer, size) __get_bytes(state, buffer, size)
 #define INIT_BUFFER(name, size) \
-    unsigned char name[size]; \
-    GET_BYTES(name, size)
+    if(_pos_in_buffer + size > BUFFER_SIZE) {  \
+        __load_data_into_buffer(state); \
+    } \
+    u8 *name = _buffer + _pos_in_buffer;
 
 #define LOWER_BITS(value, n) (value & ((1 << n) - 1))
 #define MIDDLE_BITS(value, uppwer, lower) (value & (((1 << uppwer) - 1) << lower))
 
-int main() 
-{
-    // TODO: change this to args
-    // char trace_file_name[] = "traces/hw1-prog0-trace-dump.pt";
-    // char mapping_file_name[] = "traces/hw1-prog0-mapping-data.mpt";
-    // char trace_out_file_name[] = "traces/trace-out.txt";
+#define RETURN_IF(x) \
+    if(x(state, packet)) return packet
+#define RETURN_IF_2(x, y) \
+    if(x(state, packet, y)) return packet
 
-    char asm_file_name[] = "trace_hw2/asm-trace.txt";
-    char trace_file_name[] =     "trace_hw2/trace-dump.pt";
-    char mapping_file_name[] =   "trace_hw2/mapping-data.mpt";
-    char trace_out_file_name[] = "trace_hw2/trace-dump.txt";
 
-    use_asm = true;
-
-    asm_init(asm_file_name);
-
-    load_output_file(trace_out_file_name);
-    load_mapping_file(mapping_file_name);
-    load_trace_file(trace_file_name);
+void start(
+    const char* asm_file, const char* pt_trace_file, 
+    const char* mapping_file, const char* out_file, 
+    bool _use_asm
+){
+    use_asm = _use_asm;
     
-    parse();
+    load_mapping_file(mapping_file);
 
-    // fclose(out_file);
+    pt_state state; 
+
+    if(use_asm) { 
+        asm_init(state.asm_parsing_state, asm_file);
+    }
+
+    load_output_file(state, out_file);
+    load_trace_file(state, pt_trace_file);
+    
+    parse(state);
+
+    if(state.previous_guest_ip != 0) {
+        // Record the lat basic block which may have 
+        // not been saved yet
+        log_basic_block(state, state.previous_guest_ip);
+    }
+
+    fclose(state.out_file);
 }
 
-/* ***** Parsing ***** */
-static u64 last_ip = 0;
 
-void parse(void) 
+void parse(pt_state& state) 
 {
-    u32 pad_count = 0;
-    bool was_pad = false;
-    bool use_tnt = false;
-    bool use_next_tnt = false;
-    bool in_psb_start = false;
-
 #ifdef DEBUG_MODE_
-    printf("Size: %lu\n", size);
+    printf(" -------- Intel PT Start ---------- \n\n");
+    printf("Size: %lu\n", state.size);
 #endif
 
-    while(offset < size) {
-        std::vector<bool> tnt_res;
+    std::optional<pt_packet> maybe_packet;
 
-        if(pad_count > 0 && !was_pad) {
-#ifdef DEBUG_MODE_
-            printf("PAD%u\n", pad_count);
-#endif  
-            pad_count = 0;
+    while((maybe_packet = try_get_next_packet(state))) {
+        pt_packet packet = *maybe_packet;
+
+        if(packet.type == PAD) {
+            // No need to track PAD packets as they do not
+            // provide any useful information 
+            state.pad_count++; // Used for debugging 
+            continue;
         }
 
-        was_pad = false;
-        use_tnt = use_next_tnt;
-        std::cout << (use_next_tnt ? "true" : "false") << " ";
-        use_next_tnt = in_psb_start ? use_next_tnt : false;
+        print_packet_debug(packet, state);
 
-        if(parse_tnt(tnt_res)) {
-            if(!use_tnt || !use_asm) continue;
+        if(packet.type == UNKOWN) {
+            // No need to track unkown packets but still 
+            // want to print for debugging purposes 
+            continue;        
+        }
 
-            // Use the tnt packet to generate a list of ips
-            u64 ip = last_ip;
+        state.last_packet = &packet;
 
-            for(auto t : tnt_res) {
-                jmp j;
-                // printf(".");
-                for(j = get_next_jmp(ip); !j.conditional; j = get_next_jmp(ip)) {
-                    printf("  1.IP: %lX JMP: %lX -> %lX\n", ip, j.loc, j.des);
-                    ip = j.des;
-                    if(ip == 0x7fd040000018) goto fail;
-                    save_ip_mapping(ip);
-                }
-                
-                if(t) { 
-                    if(ip == 0x7fd040000018) goto fail;
-                    printf("  T.IP: %lX JMP: %lX -> %lX\n", ip, j.loc, j.des);
-                    ip = j.des;
-                    save_ip_mapping(ip);
-                } else {
-                    printf("  NT.IP: %lX JMP: %lX -> %lX\n", ip, j.loc, j.des);
-                    ip = j.loc + 1;
-                }
-            }
-            
-            use_next_tnt = true;
-            last_ip = ip;
-
-fail:
-            continue;
+        // Handle this packet 
+        if(packet.type == PSB) {
+            state.in_psb = true;
+        } else if(packet.type == PSBEND) {
+            state.in_psb = false;
+        } else if(packet.type == TIP) {
+            handle_tip(state);
         } 
-        else if(parse_tip(use_next_tnt)) {
-            continue;
-        }
-        else if(parse_pip()) {
-            continue;
-        }
-        else if(parse_mode()) {
-            if(use_asm && !in_psb_start) advance_to_mode();
-            continue;
-        }
-        else if(parse_trace_stop()){
-            continue;
-        }
-        else if(parse_cbr()) {
-            continue;
-        }
-        else if(parse_tsc()) {
-            continue;
-        }
-        else if(parse_mtc()) {
-            continue;
-        }
-        else if(parse_tma()) {
-            continue;
-        }
-        else if(parse_vmcs()) {
-            continue;
-        }
-        else if(parse_ovf()) {
-            continue;
-        }
-        else if(parse_cyc()) {
-            continue;
-        }
-        else if(parse_psb(in_psb_start)) {
-            continue;
-        }
-        else if(parse_psb_end(in_psb_start)) {
-            continue;
-        }
-        else if(parse_mnt()) {
-            continue;
-        }
-        else if(parse_pad()) {
-            pad_count++;
-            was_pad = true;
-            continue;
-        }
-        else if(parse_ptw()) {
-            continue;
-        }
-        else if(parse_exstop()) {
-            continue;
-        }
-        else if(parse_mwait()) {
-            continue;
-        }
-        else if(parse_pwre()) {
-            continue;
-        }
-        else if(parse_pwre()) {
-            continue;
-        }
-        else if(parse_pwrx()) {
-            continue;
-        }
-        else if(parse_bbp()) {
-            continue;
-        }
-        else if(parse_bip()) {
-            continue;
-        }
-        else if(parse_bep()) {
-            continue;
-        }
-        else if(parse_cfe()) {
-            continue;
-        }
-        else if(parse_cfe()) {
-            continue;
-        }
-        else if(parse_evd()) {
-            continue;
+
+        // Follow asm if possible
+        if(can_follow_asm(state)) {
+            follow_asm(state);
         }
 
-        unsigned char byte;
-        GET_BYTES(&byte, 1);
-        ADVANCE(1);
+        // Keep track if the prev packet was mode / ovf
+        state.last_was_mode = false;
+        state.last_was_ovf = false;
 
-#ifdef DEBUG_MODE_
-        fprintf(stdout, "Unkown: " BYTE_TO_BINARY_PATTERN "\n", BYTE_TO_BINARY(byte));
-#endif
+        if(packet.type == MODE) {
+            state.last_was_mode = true;
+        } else if(packet.type == OVF) {
+            state.last_was_ovf = true;
+        }
     }
 }
 
-static void save_ip_mapping(unsigned long host_ip)
+
+static inline void handle_tip(pt_state& state) 
 {
-    u64 guest_ip = get_mapping(host_ip);
+    bool update_ip = true; 
+    bool was_in_fup = false;
 
-    if(guest_ip == 0) return;
+    tip_packet_data *tip_data = &state.last_packet->tip_data;
+
+    state.last_tip_was_breakpoint = 
+        tip_data->ip == state.breakpoint_ip;
+        // If a call to the breakpoint has been made record this in 
+        // the state so it can be used to continue to follow asm
+
+    if(tip_data->type == TIP_TIP && state.breakpoint_ip == 0 &&
+       state.next_tip_is_breakpoint) {
+        // This is the first call to the breakpoint functoin. We can 
+        // use this ip to record it for future use 
+        state.breakpoint_ip = tip_data->ip;
+        state.last_tip_was_breakpoint = true;
+
+        printf_debug(
+            "  Setting: breakpoint_ip: 0x%lX\n", state.breakpoint_ip
+        );
+    }
+
+
+    if(tip_data->type == TIP_TIP && state.qemu_caller_ip == 0) {
+        // This is the first TIP packet of the trace. We can use 
+        // this ip as the qemu_call_ip, called after every ipt_start 
+        state.qemu_caller_ip = tip_data->ip;
+        
+        printf_debug(
+            "  Setting: qemu_caller_ip: 0x%lX\n", state.qemu_caller_ip
+        );
+    }
     
-    log_basic_block(guest_ip);
 
-    #ifdef DEBUG_MODE_ 
-        printf("    IP: %lX", host_ip);
+    if(tip_data->type == TIP_FUP &&
+            !(state.last_was_mode || state.last_was_ovf)
+        ) {
+        // We have found an unbound FUP packet. Expecting to 
+        // to see a pgd packet to bind to this one 
+        state.in_fup = true;
+    }
 
-        if(guest_ip != 0) {
-            printf(" Maps To %lX", guest_ip);
-        }
+    if((tip_data->type == TIP_PGD || tip_data->type == TIP_PGE) && 
+        state.in_fup) {
+        // We have found an a PGD packet which binds to the 
+        // previous FUP packet 
+        state.in_fup = false;
+        was_in_fup = true;
+    }
 
-        printf("\n");
-    #endif
+    if((state.last_ip_was_reached_by_u_jump &&
+       state.last_ip_had_mapping && (state.in_psb || state.in_fup)) || (
+        was_in_fup && state.last_ip_had_mapping && 
+        state.last_tip_ip == tip_data->ip && 
+        state.last_tip_ip == state.current_ip
+       )) {
+        // Want to remove the last ip from the record has we will
+        // reach it again. This may not be entierly true tbh 
+        printf_debug("  NOTE: Removing previous block from save\n");
+        state.previous_guest_ip = 0;
+    }
+
+    if(state.in_fup) { // Cannot update current ip
+        printf_debug("  IN FUP\n");
+        return;
+    }
+
+    if(state.current_ip == tip_data->ip && 
+       state.last_tip_ip == state.current_ip && 
+       tip_data->type == TIP_FUP && state.in_psb) {
+        // We have resived a refresh of the current ip, but it 
+        // is the same as the current. This will cuase a log to 
+        // occour twice, we don't want that. 
+        update_ip = false;
+    }
+
+
+    // Can update the current ip 
+    if(update_ip) {
+        state.last_tip_ip = tip_data->ip;
+        update_current_ip(state, tip_data->ip);
+    }
+
+
+    if(tip_data->ip == state.qemu_caller_ip && 
+       state.qemu_return_ip == 0 && use_asm) {
+        // If we have just set the qemu_caller_ip, after updating the 
+        // current ip the first basic block of asm will be parsed 
+        // we can use this to get the qemu_return_ip, jumped to prior to 
+        // leaving jit code. It is always the last jmp in a block 
+        state.qemu_return_ip = get_last_jmp_loc(
+            state.asm_parsing_state
+        );
+
+        printf_debug(
+            "  Setting: qemu_return_ip: 0x%lX\n", state.qemu_return_ip
+        );
+    }
+
+    // reset if needed 
+    state.next_tip_is_breakpoint = false;
 }
 
 
-static bool parse_tnt(std::vector<bool>& tnt) 
+static inline bool can_follow_asm(pt_state& state)
+{
+    return 
+        (
+            (state.last_packet->type == TIP && !state.in_fup && 
+             !state.last_tip_was_breakpoint /* want to wait for tnt */) || 
+            (state.last_packet->type == TNT)
+        ) && (
+            !state.in_psb
+        ) && use_asm;
+}
+
+
+static inline void follow_asm(pt_state& state)
+{
+    bool has_tnt = state.last_packet->type == TNT;
+
+    u32 tnt_packet_p = 0;
+    tnt_packet_data *tnt_packet = has_tnt ? 
+        &state.last_packet->tnt_data : NULL;
+
+    // Check if we have just exited a breakpoint
+    if(state.last_tip_was_breakpoint) {
+        if(!has_tnt) {
+            printf("Error: cannot return from breakpoint without tnt\n");
+            exit(EXIT_FAILURE);
+        }
+
+        if(!tnt_packet->tnt[tnt_packet_p++]) {
+            printf("Error: return from breakpoint but tnt marked as not taken\n");
+            exit(EXIT_FAILURE);
+        }
+
+        // can return from this breakpoint call
+        state.last_tip_was_breakpoint = false;
+
+        state.last_ip_was_reached_by_u_jump = false;
+
+        update_current_ip(
+            state, state.breakpoint_return_ip
+        );
+    }
+
+    // Follow instructoins until either 
+    //  1. A conditional jmp without a corisponding tnt is reached
+    //  2. A call to qemu code is reached 
+
+     if(!state.tracing_jit_code)
+        return; // Not in jitted code, no asm to follow
+
+    bool can_continue = true;
+
+    while(can_continue && state.tracing_jit_code) {
+        // Get the next instruction to follow 
+        pt_instruction instr;
+
+        auto parsed_instr = get_next_instr(
+            state, state.current_ip, instr
+        );
+
+        if(!parsed_instr) {
+            can_continue = false;
+            break;
+        }
+
+        // Follow this instruction 
+        switch(instr.type) {
+        case PT_JMP: // Follow this jump 
+            printf_debug(
+                "  TU. 0x%lX jmp 0x%lX\n", instr.loc, instr.des
+            );
+
+            if(instr.des == state.qemu_return_ip) {
+                printf_debug("    JMP. leaving jit code\n");
+                // Leaving jit code, cannot continue to follow asm
+                // this will be updated in the state by update_current_ip
+            }
+
+            update_current_ip(
+                state, instr.des
+            );
+
+            // Set this to help us back track in the event
+            // that a psb-fup-psbend event is sent inbetween 
+            // an unconditional jump and the next real-packet 
+            state.last_ip_was_reached_by_u_jump = true;
+            
+            break;
+        case PT_JXX: // Follow this conditional jump
+            if(!has_tnt || tnt_packet_p >= tnt_packet->size) {
+                // Need more tnt packet data to continue 
+                can_continue = false;
+                break;
+            }
+
+            // If we do/don't take a conditional jump
+            // that still updates the ip resetting the u_jump status
+            state.last_ip_was_reached_by_u_jump = false;
+
+            if(!tnt_packet->tnt[tnt_packet_p++]) {
+                // Conditional jump is not taken
+                state.current_ip = instr.loc + 1;
+
+                printf_debug(
+                    "  NT. 0x%lX jxx 0x%lX\n", instr.loc, instr.des
+                );
+
+                break;
+            }
+
+            // Conditional jump is taken
+            printf_debug(
+                "  TC. 0x%lX jxx 0x%lX\n", instr.loc, instr.des
+            );
+
+            if(instr.des == state.qemu_return_ip) {
+                printf_debug("    JMP. leaving jit code\n");
+                // Leaving jit code, cannot continue to follow asm
+                // this will be updated in the state by update_current_ip
+            }
+
+            update_current_ip(
+                state, instr.des
+            );
+            break;
+        case PT_CALL: { // Handle this call
+            // TODO: Need to move the first instance of the call to the first basic block
+
+            // Cannot continue to follow calls 
+            can_continue = false;
+
+            u64 breakpoint_return_ip = instr.loc + 1;
+
+
+            if(instr.is_breakpoint) {
+                printf_debug(
+                    "  TU. 0x%lX call breakpoint\n", instr.loc
+                );
+                
+                state.next_tip_is_breakpoint = true;
+            } else {
+                printf_debug(
+                    "  TU. 0x%lX call qemu\n", instr.loc
+                );
+
+                // return is not next instruction, but next again
+                pt_instruction i;
+
+                auto mi = get_next_instr(
+                    state, breakpoint_return_ip, i
+                );
+
+                if(!mi) {
+                    printf("    Error: qemu call is not followed by breakpoint\n");
+                    exit(EXIT_FAILURE);
+                }
+
+                breakpoint_return_ip = i.loc + 1;
+            }
+
+            state.breakpoint_return_ip = breakpoint_return_ip;
+
+            break;
+        } }
+    }
+}  
+
+
+static inline void update_current_ip(
+    pt_state& state, u64 ip
+) {
+    state.current_ip = ip;
+
+    state.last_ip_was_reached_by_u_jump = false; // reset 
+
+    // Check if we can advance the asm
+    if(state.current_ip == state.qemu_caller_ip && use_asm) {
+        advance_to_ipt_start(state.asm_parsing_state);
+    }
+
+    // Check if this ip is jitted code 
+    state.tracing_jit_code = ip_inside_block(
+        state.asm_parsing_state, ip
+    );
+
+    // Check if this ip maps to a basic block
+    u64 guest_ip = get_mapping(state.current_ip);
+
+    state.last_ip_had_mapping = guest_ip != 0;
+
+    if(guest_ip == 0) 
+        return; // Doesn't map nothng more to do 
+    // Does map log it and check for errors 
+    
+    log_basic_block(state, guest_ip);
+
+    printf_debug(
+        "    Host IP: 0x%lX -> Guest IP: 0x%lX\n", 
+        state.current_ip, guest_ip
+    );
+
+    if(!state.tracing_jit_code && use_asm) {
+        printf(
+            "    Error: The block containing the above ip"
+            " has not been translated: 0x%lx\n", guest_ip
+        );
+        exit(EXIT_FAILURE);
+    }   
+}
+
+
+
+/* Instructions */
+
+static inline bool get_next_instr(
+    pt_state& state, u64 ip, pt_instruction& instruction
+) {
+    // Todo: Maybe add an option to check the next instruction
+    //       is not outside of the current block 
+    if(!state.tracing_jit_code) false;
+    
+    // Simple case jit instruction
+    auto *instr = get_next_jit_instr(
+        state.asm_parsing_state, ip
+    );
+
+    if(instr == NULL) false;
+
+    instruction.is_qemu_src = false;
+    instruction.type = jit_to_pt_instr_type(instr->type);
+    instruction.loc = instr->loc;
+    instruction.des = instr->des;
+    instruction.is_breakpoint = instr->is_breakpoint;
+
+
+    // return { pt_instruction(
+    //     jit_to_pt_instr_type(instr->type), false,
+    //     instr->loc, instr->des, instr->is_breakpoint
+    // ) };
+
+    return true;
+}
+
+
+static inline pt_instruction_type jit_to_pt_instr_type(
+    jit_asm_type type
+) {
+    switch (type) {
+    case JIT_JXX: return PT_JXX;
+    case JIT_JMP: return PT_JMP;
+    case JIT_CALL: return PT_CALL;
+    }
+}
+
+
+
+static inline void print_packet_debug(pt_packet& packet, pt_state& state)
+{
+#ifdef DEBUG_MODE_
+    if(state.pad_count > 0) {
+        printf("PAD x %lu\n", state.pad_count);
+        state.pad_count = 0;
+    }
+
+    print_packet(packet);
+#endif
+}
+
+/* ***** Concurrent Parsing ***** */
+static std::optional<pt_packet> try_get_next_packet(pt_state& state)
+{
+#ifdef DEBUG_TIME_
+    static u8 last_percentage = -1;
+#endif
+    // Todo: need to move this out of the function into pt_state 
+    static u64 last_tip_ip = 0;
+
+#ifdef DEBUG_MODE_
+    u64 old_offset = state.offset;
+#endif
+
+    if(state.offset >= state.size) {
+        // No more packets
+        return std::nullopt;
+    }
+
+#ifdef DEBUG_TIME_
+    if((u8)(((double)state.offset / state.size) * 100) != last_percentage) {
+        last_percentage = ((double)state.offset / state.size) * 100;
+        fprintf(stderr, "TIME: %u%%\n", last_percentage);
+        printf("TIME: %u%%\n", last_percentage);
+    }
+#endif
+
+    pt_packet packet = get_next_packet(state, last_tip_ip);
+
+#ifdef DEBUG_MODE_
+    if(packet.type != PAD) printf("OFST: %u: ", old_offset);
+#endif
+
+    if(packet.type == TIP) {
+        last_tip_ip = packet.tip_data.ip;
+    }
+
+    return { packet };
+}
+
+
+/* ***** Parsing ***** */
+static inline pt_packet get_next_packet(pt_state& state, u64 curr_ip)
+{
+    pt_packet packet(UNKOWN); // Todo: rename unknown 
+    
+    RETURN_IF(parse_psb);
+    RETURN_IF(parse_psb_end);
+    RETURN_IF(parse_short_tnt);
+    RETURN_IF(parse_long_tnt);
+    RETURN_IF_2(parse_tip, curr_ip);
+    RETURN_IF(parse_pip);
+    RETURN_IF(parse_mode);
+    RETURN_IF(parse_trace_stop);
+    RETURN_IF(parse_cbr);
+    RETURN_IF(parse_tsc);
+    RETURN_IF(parse_mtc);
+    RETURN_IF(parse_tma);
+    RETURN_IF(parse_vmcs);
+    RETURN_IF(parse_ovf);
+    RETURN_IF(parse_cyc);
+    RETURN_IF(parse_mnt);
+    RETURN_IF(parse_pad);
+    RETURN_IF(parse_ptw);
+    RETURN_IF(parse_exstop);
+    RETURN_IF(parse_mwait);
+    RETURN_IF(parse_pwre);
+    RETURN_IF(parse_pwrx);
+    RETURN_IF(parse_bbp);
+    RETURN_IF(parse_bip);
+    RETURN_IF(parse_bep);
+    RETURN_IF(parse_cfe);
+    RETURN_IF(parse_evd);
+
+    parse_unkown(state, packet);
+
+    return packet;
+}
+
+
+static inline bool parse_short_tnt(pt_state& state, pt_packet& packet)
 {
     // Attempt to pase a short TNT packet
     if(!LEFT(SHORT_TNT_PACKET_LENGTH))
         return false;
     
-    char byte;
+    u8 byte;
     GET_BYTES(&byte, 1);
 
-    if(LOWER_BITS(byte, 1) == 0) {
-        int start_bit = 6;
+    if(LOWER_BITS(byte, 1) != 0) 
+        return false;
 
-        for(; start_bit > 0; start_bit--) {
-            if(byte & (0b10 << start_bit)) {
-                break;
-            }
+    int start_bit = 6;
+
+    for(; start_bit > 0; start_bit--) {
+        if(byte & (0b10 << start_bit)) {
+            break;
         }
-
-        if(start_bit == 0) goto long_tnt;
-
-#ifdef DEBUG_MODE_
-        printf("SHORT TNT: " BYTE_TO_BINARY_PATTERN "\n", BYTE_TO_BINARY(byte));
-#endif
-
-        for(int i = start_bit - 1; i >= 0; i--) {
-            bool taken = (byte & (0b10 << i));
-            tnt.push_back(taken);
-        }
-        
-        ADVANCE(1);
-        return true;
     }
 
-    // Attempt to parse a Long TNT packet 
-long_tnt:
+    if(start_bit == 0) return false;
+
+    // Is Short TNT packet. Parse it's data
+    tnt_packet_data& data = packet.tnt_data;
+    data.size = start_bit;
+
+    for(int i = start_bit - 1; i >= 0; i--) {
+        bool taken = (byte & (0b10 << i));
+        data.tnt[start_bit - (i + 1)] = taken;
+    }
+    
+    ADVANCE(1);
+
+    packet.type = TNT;
+
+    return true;
+}
+
+static inline bool parse_long_tnt(pt_state& state, pt_packet& packet)
+{
+     // Attempt to parse a Long TNT packet 
     if(!LEFT(LONG_TNT_PACKET_LENGTH)) 
         return false;
 
@@ -302,169 +663,113 @@ long_tnt:
 
     ADVANCE(LONG_TNT_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("LONG TNT\n");
-#endif
-
-    return true;
+    // TODO: implement 
+    return false;
 }
 
 
-static bool parse_tip(bool& use_next_tnt) 
+static inline bool parse_tip(pt_state& state, pt_packet& packet, u64 curr_ip) 
 {
     if(!LEFT(TIP_PACKET_LENGTH))
         return false;
 
     INIT_BUFFER(buffer, TIP_PACKET_LENGTH);
 
-    // Get Type
-    if(parse_tip_base(buffer)) {
-#ifdef DEBUG_MODE_ 
-        printf("TIP - ");
-#endif
-    } else if(parse_tip_pge(buffer)) {
-#ifdef DEBUG_MODE_ 
-        printf("TIP PGE - ");
-#endif
-    } else if(parse_tip_pgd(buffer)) {
-#ifdef DEBUG_MODE_ 
-        printf("TIP PGD - ");
-#endif
-    } else if(parse_tip_fup(buffer)) {
-#ifdef DEBUG_MODE_ 
-        printf("TIP FUP - ");
-#endif
-    } else {
-        return false;
-    }
+    // Get the type of this packet 
+    auto type = parse_tip_type(buffer);
 
+    if(!type) return false;
 
-    // Check compressed status 
+    // Check if the ip is within context
     u8 ip_bits = buffer[0] >> 5;
-    u8 last_ip_use = 0;
 
-#ifdef DEBUG_MODE_
-    printf(BYTE_TO_BINARY_PATTERN " - %u - ", BYTE_TO_BINARY(buffer[0]), ip_bits);
-#endif
-
-    switch (ip_bits)
-    {
-    case 0b000:
-#ifdef DEBUG_MODE_
-        printf("IP out of context\n");
-#endif
+    if(ip_bits == 0b000) {
         ADVANCE(1);
+        packet.type = TIP_OUT_OF_CONTEXT;
         return true;
-    case 0b001:
-        last_ip_use = 6;
-        break;
-    case 0b010:
-        last_ip_use = 4;
-        break;
-    case 0b011:
-#ifdef DEBUG_MODE_ 
-        printf("Not implemented ");
-#endif
-        return false;
-        break;
-    case 0b100:
-        last_ip_use = 2;
-        break;
-    case 0b110:
-        last_ip_use = 0;
-        break;
-    default:
-#ifdef DEBUG_MODE_ 
-        printf("Reserved bits\n");
-#endif
-        return false;
     }
 
-#ifdef DEBUG_MODE_
-    printf("%u - ", last_ip_use);
-#endif
+    // ip in context get compression status
+    auto last_ip_use = parse_tip_ip_use(ip_bits);
+    if(!last_ip_use) return false;
 
-    // Create ip
-    u64 ip = 0;
+    // Create ip buffer
+    u64 ip_buffer = 0;
+    u64 ip = curr_ip;
 
     for(int i = 0; i < 8; i++) {
-        u8 byte; 
-
-        if(i >= last_ip_use) {
-            byte = buffer[8 - i];
-        } else {
-            byte = (last_ip >> ((7 - i) * 8)) & 0xff;
-        }
+        u8 byte = i >= *last_ip_use ? 
+            buffer[8 - i] : 
+            (curr_ip >> ((7 - i) * 8)) & 0xff;
 
         ip = (ip << 8) | byte;
+
+        if(i >= *last_ip_use)
+            ip_buffer = (ip_buffer << 8) | byte;
     }
 
-    last_ip = ip;
+    // Finished return packet
+    ADVANCE(TIP_PACKET_LENGTH - *last_ip_use);
 
-    u64 guest_ip = get_mapping(last_ip);
-
-    if(guest_ip != 0) { 
-        log_basic_block(guest_ip);
-    }
-
-#ifdef DEBUG_MODE_ 
-    printf("IP: %lX", ip);
-
-    if(guest_ip != 0) {
-        printf(" Maps To %lX", guest_ip);
-        use_next_tnt = true;
-    }
-
-    printf("\n");
-#endif
-
-    ADVANCE(TIP_PACKET_LENGTH - last_ip_use);
+    packet.tip_data = tip_packet_data(
+        *type, ip_bits, *last_ip_use, ip_buffer, ip
+    );
+    packet.type = TIP;
 
     return true;
 }  
 
 
-static bool parse_tip_base(unsigned char *buffer) 
+static std::optional<pt_tip_type> parse_tip_type(unsigned char *buffer)
 {
     unsigned char bits = LOWER_BITS(buffer[0], TIP_OPPCODE_LENGTH_BITS);
 
-    if(bits != TIP_BASE_OPPCODE)
-        return false;
-    return true;
+    switch (bits) {
+    case TIP_BASE_OPPCODE:
+        return { TIP_TIP };
+    case TIP_PGE_OPPCODE:
+        return { TIP_PGE };
+    case TIP_PGD_OPPCODE:
+        return { TIP_PGD };
+    case TIP_FUP_OPPCODE:
+        return { TIP_FUP };
+    default:
+        return std::nullopt;
+    }
 }
 
 
-static bool parse_tip_pge(unsigned char *buffer) 
+static std::optional<u8> parse_tip_ip_use(u8 ip_bits)
 {
-    unsigned char bits = LOWER_BITS(buffer[0], TIP_OPPCODE_LENGTH_BITS);
-
-    if(bits != TIP_PGE_OPPCODE)
-        return false;
-    return true;
+    switch (ip_bits) {
+    case 0b001:
+        return {6};
+        break;
+    case 0b010:
+        return {4};
+        break;
+    case 0b011:
+#ifdef DEBUG_MODE_ 
+        printf("TIP - Not implemented\n");
+#endif
+        return std::nullopt;
+        break;
+    case 0b100:
+        return {2};
+        break;
+    case 0b110:
+        return {0};
+        break;
+    default:
+#ifdef DEBUG_MODE_ 
+        printf("TIP - Reserved bits\n");
+#endif
+        return std::nullopt;
+    }
 }
 
 
-static bool parse_tip_pgd(unsigned char *buffer) 
-{
-    unsigned char bits = LOWER_BITS(buffer[0], TIP_OPPCODE_LENGTH_BITS);
-
-    if(bits != TIP_PGD_OPPCODE)
-        return false;
-    return true;
-}
-
-
-static bool parse_tip_fup(unsigned char *buffer) 
-{
-    unsigned char bits = LOWER_BITS(buffer[0], TIP_OPPCODE_LENGTH_BITS);
-
-    if(bits != TIP_FUP_OPPCODE)
-        return false;
-    return true;
-}
-
-
-static bool parse_pip(void)
+static inline bool parse_pip(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(PIP_PACKET_LENGTH))
         return false;
@@ -477,15 +782,13 @@ static bool parse_pip(void)
 
     ADVANCE(PIP_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("PIP\n");
-#endif
+    packet.type = PIP;
 
     return true;
 }
 
 
-static bool parse_mode(void)
+static inline bool parse_mode(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(MODE_PACKET_LENGTH))    
         return false;
@@ -499,15 +802,13 @@ static bool parse_mode(void)
 
     ADVANCE(MODE_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("\n ---------- MODE ---------- \n\n");
-#endif
+    packet.type = MODE;
 
     return true;
 }
 
 
-static bool parse_trace_stop(void) 
+static inline bool parse_trace_stop(pt_state& state, pt_packet& packet) 
 {
     if(!LEFT(TRACE_STOP_PACKET_LENGTH))
         return false;
@@ -520,15 +821,13 @@ static bool parse_trace_stop(void)
     
     ADVANCE(TRACE_STOP_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("Trace Stop\n");
-#endif
+    packet.type = TRACE_STOP;
 
     return true;
 }
 
 
-static bool parse_cbr(void) 
+static inline bool parse_cbr(pt_state& state, pt_packet& packet) 
 {
     if(!LEFT(CBR_PACKET_LENGTH))
         return false;
@@ -541,15 +840,13 @@ static bool parse_cbr(void)
 
     ADVANCE(CBR_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("CBR\n");
-#endif
+    packet.type = CBR;
 
     return true;
 }
 
 
-static bool parse_tsc(void) 
+static inline bool parse_tsc(pt_state& state, pt_packet& packet) 
 {
     if(!LEFT(TSC_PACKET_LENGTH))
         return false;
@@ -561,15 +858,13 @@ static bool parse_tsc(void)
 
     ADVANCE(TSC_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("TSC\n");
-#endif
+    packet.type = TSC;
 
     return true;
 }
 
 
-static bool parse_mtc(void)
+static inline bool parse_mtc(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(MTC_PACKET_LENGTH))
         return false;
@@ -581,15 +876,13 @@ static bool parse_mtc(void)
 
     ADVANCE(TSC_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("MTC\n");
-#endif
+    packet.type = MTC;
 
     return true;
 }
 
 
-static bool parse_tma(void)
+static inline bool parse_tma(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(TMA_PACKET_LENGTH))
         return false;
@@ -602,15 +895,13 @@ static bool parse_tma(void)
     
     ADVANCE(TMA_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("TMA\n");
-#endif
+    packet.type = TMA;
 
     return true;
 }
 
 
-static bool parse_vmcs(void)
+static inline bool parse_vmcs(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(VMCS_PACKET_LENGTH))
         return false;
@@ -623,15 +914,13 @@ static bool parse_vmcs(void)
 
     ADVANCE(VMCS_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("VMCS\n");
-#endif
+    packet.type = VMCS;
 
     return true;
 }
 
 
-static bool parse_ovf(void)
+static inline bool parse_ovf(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(OVF_PACKET_LENGTH))
         return false;
@@ -644,22 +933,20 @@ static bool parse_ovf(void)
 
     ADVANCE(OVF_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("OVF\n");
-#endif
+    packet.type = OVF;
 
     return true;
 }
 
 
-static bool parse_cyc(void)
+static inline bool parse_cyc(pt_state& state, pt_packet& packet)
 {
     // Todo: implement this
     return false;
 }
 
 
-static bool parse_psb(bool& in_psb_start)
+static inline bool parse_psb(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(PSB_PACKET_LENGTH))
         return false;
@@ -673,20 +960,13 @@ static bool parse_psb(bool& in_psb_start)
 
     ADVANCE(PSB_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("PSB\n");
-#endif
-
-    in_psb_start = true;
-
-    // Todo: Unsure if this is correct. 
-    //last_ip = 0;
+    packet.type = PSB;
 
     return true;
 }
 
 
-static bool parse_psb_end(bool& in_psb_start)
+static inline bool parse_psb_end(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(PSB_END_PACKET_LENGTH))
         return false;
@@ -699,17 +979,13 @@ static bool parse_psb_end(bool& in_psb_start)
 
     ADVANCE(PSB_END_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("PSBEND\n");
-#endif
-
-    in_psb_start = false;
+    packet.type = PSBEND;
 
     return true;
 }
 
 
-static bool parse_mnt(void)
+static inline bool parse_mnt(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(MNT_PACKET_LENGTH))
         return false;
@@ -723,15 +999,13 @@ static bool parse_mnt(void)
 
     ADVANCE(MNT_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("MNT\n");
-#endif
+    packet.type = MNT;
 
     return true;
 }
 
 
-static bool parse_pad(void)
+static inline bool parse_pad(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(PAD_PACKET_LENGTH))   
         return false;
@@ -743,11 +1017,13 @@ static bool parse_pad(void)
 
     ADVANCE(PAD_PACKET_LENGTH);
 
+    packet.type = PAD;
+
     return true;
 }
 
 
-static bool parse_ptw(void) 
+static inline bool parse_ptw(pt_state& state, pt_packet& packet) 
 {
     if(!LEFT(PTW_HEADER_LENGTH))
         return false;
@@ -768,15 +1044,13 @@ static bool parse_ptw(void)
 
     ADVANCE(packet_length);
 
-#ifdef DEBUG_MODE_
-    printf("PTW\n");
-#endif    
+    packet.type = PTW;
 
     return true;
 }
 
 
-static bool parse_exstop(void)
+static inline bool parse_exstop(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(EXSTOP_PACKET_LENGTH))
         return false;
@@ -789,15 +1063,13 @@ static bool parse_exstop(void)
 
     ADVANCE(EXSTOP_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("EXSTOP\n");
-#endif
+    packet.type = EXSTOP;
 
     return true;
 }
 
 
-static bool parse_mwait(void)
+static inline bool parse_mwait(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(MWAIT_PACKET_LENGTH))
         return false;
@@ -810,15 +1082,13 @@ static bool parse_mwait(void)
 
     ADVANCE(MWAIT_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("MWAIT\n");
-#endif
+    packet.type = MWAIT;
 
     return true;
 }
 
 
-static bool parse_pwre(void)
+static inline bool parse_pwre(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(PWRE_PACKET_LENGTH))
         return false;
@@ -829,17 +1099,13 @@ static bool parse_pwre(void)
        buffer[1] != PWRE_OPPCODE)
         return false;
 
-    ADVANCE(PWRE_PACKET_LENGTH);
-
-#ifdef DEBUG_MODE_
-    printf("PWRE\n");
-#endif
+    packet.type = PWRE;
 
     return true;
 }
 
 
-static bool parse_pwrx(void)
+static inline bool parse_pwrx(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(PWRX_PACKET_LENGTH))
         return false;
@@ -852,15 +1118,13 @@ static bool parse_pwrx(void)
 
     ADVANCE(PWRX_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("PWRX\n");
-#endif
+    packet.type = PWRX;
 
     return true;
 }
 
 
-static bool parse_bbp(void)
+static inline bool parse_bbp(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(BBP_PACKET_LENGTH))
         return false;
@@ -873,22 +1137,20 @@ static bool parse_bbp(void)
 
     ADVANCE(BBP_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("BBP\n");
-#endif
+    packet.type = BBP;
 
     return true;
 }
 
 
-static bool parse_bip(void)
+static inline bool parse_bip(pt_state& state, pt_packet& packet)
 {
     // Todo implement
     return false;
 }
 
 
-static bool parse_bep(void)
+static inline bool parse_bep(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(BEP_PACKET_LENGTH))
         return false;
@@ -901,15 +1163,13 @@ static bool parse_bep(void)
 
     ADVANCE(BEP_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("BEP\n");
-#endif
+    packet.type = BEP;
 
     return true;
 }
 
 
-static bool parse_cfe(void)
+static inline bool parse_cfe(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(CFE_PACKET_LENGTH))
         return false;
@@ -922,15 +1182,13 @@ static bool parse_cfe(void)
 
     ADVANCE(CFE_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("CFE\n");
-#endif
+    packet.type = CFE;
 
     return true;
 }
 
 
-static bool parse_evd(void)
+static inline bool parse_evd(pt_state& state, pt_packet& packet)
 {
     if(!LEFT(EVD_PACKET_LENGTH))
         return false;
@@ -943,33 +1201,210 @@ static bool parse_evd(void)
 
     ADVANCE(EVD_PACKET_LENGTH);
 
-#ifdef DEBUG_MODE_
-    printf("EVD\n");
-#endif
+    packet.type = EVD;    
 
-    return true;
+    return  true;
+}
+
+
+static inline void parse_unkown(pt_state& state, pt_packet& packet)
+{
+    u8 byte;
+    GET_BYTES(&byte, 1);
+    ADVANCE(1);
+
+    packet.type = UNKOWN;
+    packet.unkown_data = unkown_packet_data(byte);
+}
+
+/* ***** Debugging ***** */
+static void print_packet(const pt_packet& packet)
+{
+    switch (packet.type) {
+    case TNT:
+        print_tnt(packet);
+        break;
+    case TIP:
+        print_tip(packet);
+        break;
+    case TIP_OUT_OF_CONTEXT:
+        printf("TIP - Out of Context\n");
+        break;
+    case PIP:
+        printf("PIP\n");
+        break;
+    case MODE:
+        printf("MODE\n");
+        break;
+    case TRACE_STOP:
+        printf("TRACE_STOP\n");
+        break;
+    case CBR:
+        printf("CBR\n");
+        break;
+    case TSC:
+        printf("TSC\n");
+        break;
+    case MTC:
+        printf("MTC\n");
+        break;
+    case TMA:
+        printf("TMA\n");
+        break;
+    case VMCS:
+        printf("VMCS\n");
+        break;
+    case OVF:
+        printf("OVF\n");
+        break;
+    case CYC:
+        printf("CYC\n");
+        break;
+    case PSB:
+        printf("\n ----- ----- PSB ----- -----\n\n");
+        break;
+    case PSBEND:
+        printf("\n ----- ----- END ----- ----- \n\n");
+        break;
+    case MNT:
+        printf("MNT\n");
+        break;
+    case PAD:
+        printf("PAD\n");
+        break;
+    case PTW:
+        printf("PTW\n");
+        break;
+    case EXSTOP:
+        printf("EXSTOP\n");
+        break;
+    case MWAIT:
+        printf("MWAIT\n");
+        break;
+    case PWRE:
+        printf("PWRE\n");
+        break;
+    case PWRX:
+        printf("PWRX\n");
+        break;
+    case BBP:
+        printf("BBP\n");
+        break;
+    case BIP:
+        printf("BIP\n");
+        break;
+    case BEP:
+        printf("BEP\n");
+        break;
+    case CFE:
+        printf("CFE\n");
+        break;
+    case EVD:
+        printf("EVD\n");
+        break;
+    case UNKOWN:
+        printf(
+            "UNKOWN: " BYTE_TO_BINARY_PATTERN "\n", 
+            BYTE_TO_BINARY(packet.unkown_data.byte)
+        );
+        break;
+    }
+}
+
+
+static void print_tip(const pt_packet& packet)
+{
+    // Print Type 
+    printf("TIP ");
+
+    switch(packet.tip_data.type) {
+    case TIP_TIP: printf("-"); break;
+    case TIP_PGE: printf("PGE -"); break;
+    case TIP_PGD: printf("PGD -"); break;
+    case TIP_FUP: printf("FUP -"); break;
+    }
+
+    printf(" %u - ", packet.tip_data.last_ip_use);
+
+    // Print Ip
+    printf("0x%lX\n", packet.tip_data.ip);
+}
+
+
+static void print_tnt(const pt_packet& packet)
+{
+    printf("TNT %u: ", packet.tnt_data.size);
+
+    for(int i = 0; i < packet.tnt_data.size; i++) {
+        printf("%u", packet.tnt_data.tnt[i]);
+    }
+
+    printf("\n");
 }
 
 
 /* ***** File Management ***** */
-static void load_trace_file(char *file_name)
+static void load_trace_file(pt_state& state, const char *file_name)
 {
-    trace_data = fopen(file_name, "rb");
+    state.trace_data = fopen(file_name, "rb");
 
-    if(trace_data == NULL) {
+    if(state.trace_data == NULL) {
         fprintf(stderr, "Failed to open data file: %s\n", file_name);
         exit(EXIT_FAILURE);
     }
 
-    fseek(trace_data, 0L, SEEK_END);
-    size = ftell(trace_data);
-    fseek(trace_data, 0L, SEEK_SET);
+    // Get length of the file 
+    fseek(state.trace_data, 0L, SEEK_END);
+    state.size = ftell(state.trace_data);
+    fseek(state.trace_data, 0L, SEEK_SET);
 
-    offset = 0;
+    state.offset = 0;
+
+    __load_data_into_buffer(state);
 }
 
 
-static void load_mapping_file(char *file_name) 
+static void __advance(pt_state& state, u8 n)
+{
+    state.offset += n; // Track global pos 
+    _pos_in_buffer += n; // Track local pos 
+
+    if(_pos_in_buffer < BUFFER_SIZE) return;
+
+    __load_data_into_buffer(state);
+}
+
+
+static void __get_bytes(pt_state& state, u8 *buffer, u8 n)
+{
+    if(_pos_in_buffer + n >= BUFFER_SIZE) {  
+        __load_data_into_buffer(state);
+    }
+
+    memcpy(buffer, _buffer + _pos_in_buffer, n);
+}
+
+
+static void __load_data_into_buffer(pt_state& state)
+{
+    size_t old_data = (_pos_in_buffer == 0) ? 
+        0 : BUFFER_SIZE - _pos_in_buffer; 
+
+    if(old_data > 0) {
+        memcpy(
+            _buffer, _buffer + _pos_in_buffer, old_data
+        );
+    }
+
+    size_t new_data = BUFFER_SIZE - old_data;
+
+    fread(_buffer + old_data, new_data, 1, state.trace_data);
+
+    _pos_in_buffer = 0; // Reset local position
+}
+
+
+static void load_mapping_file(const char *file_name) 
 {
     FILE* mapping_data = fopen(file_name, "r");
 
@@ -977,9 +1412,6 @@ static void load_mapping_file(char *file_name)
         fprintf(stderr, "Failed to open data file: %s\n", file_name);
         exit(EXIT_FAILURE);
     }
-
-    // Skip Header
-    // Todo: implement
 
     // Read Data 
     unsigned long guest_pc;
@@ -993,24 +1425,27 @@ static void load_mapping_file(char *file_name)
 }
 
 
-static unsigned long get_mapping(unsigned long host_pc) 
+static u64 get_mapping(u64 host_pc) 
 {
     return host_ip_to_guest_ip[host_pc];   
 }
 
 
-static void load_output_file(char *file_name)
+static void load_output_file(pt_state& state, const char *file_name)
 {
-    out_file = fopen(file_name, "w+");
+    state.out_file = fopen(file_name, "w+");
 
-    if(out_file == NULL) {
+    if(state.out_file == NULL) {
         fprintf(stderr, "Failed to open trace output file: %s\n", file_name);
         exit(EXIT_FAILURE);
     }
 }
 
 
-static void log_basic_block(unsigned long id) 
+static void log_basic_block(pt_state& state, u64 id) 
 {
-    fprintf(out_file, "%lX\n", id);
+    if(state.previous_guest_ip != 0) {
+        fprintf(state.out_file, "%lX\n", state.previous_guest_ip);
+    } 
+    state.previous_guest_ip = id;
 }

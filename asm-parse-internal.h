@@ -4,44 +4,29 @@
 #include <stdio.h>
 #include <stdbool.h>
 
+#include <string>
+#include <map>
+
 #include "types.h"
+#include "asm-parse.h"
+#include "asm-types.h"
 
-typedef enum trace_type {
-    BLOCK,
-    JXX,
-    JMP,
-    LABEL,
-    UPDATE,
-    IPT_START,
-    IPT_STOP
-} trace_type;
+static inline bool parse_trace_element(std::string& line, trace_element& out);
+static inline bool parse_block(std::string& line, trace_element& out);
+static inline bool parse_block_size(std::string& line, trace_element& out);
+static inline bool parse_jmp(std::string& line, trace_element& out);
+static inline bool parse_jxx1(std::string& line, trace_element& out);
+static inline bool parse_jxx2(std::string& line, trace_element& out);
+static inline bool parse_update(std::string& line, trace_element& out);
+static inline bool parse_label(std::string& line, trace_element& out);
+static inline bool parse_ipt_start(std::string& line, trace_element& out);
+static inline bool parse_ipt_stop(std::string& line, trace_element& out);
+static inline bool parse_jxx_ldst(std::string& line, trace_element& out);
+static inline bool parse_call(std::string& line, trace_element& out);
 
+static void print_trace_element(trace_element& elmnt);
 
-typedef struct trace_element {
-    trace_type type;
-    union {
-        u64 block_ip; /* block */
-
-        struct { /* jmp */
-            u64 loc;
-            u64 des;
-        } jmp;
-        
-        struct { /* jxx */
-            u64 loc;
-            u32 id;
-        } jxx;
-
-        struct { /* label */
-            u64 loc;
-            u32 id;
-        } label;
-
-        struct { /* Update */
-            u64 loc;
-            u64 new_des;
-        } update;
-    } data;
-} trace_element;
+static u64 parse_ip(std::string& line, u32& pos);
+static u64 parse_id(std::string& line, u32& pos);
 
 #endif

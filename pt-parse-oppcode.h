@@ -54,7 +54,7 @@
 
 /* OVF */
 #define OVF_PACKET_LENGTH 2
-#define OVF_OPPCODE 0x73
+#define OVF_OPPCODE 0xF3
 
 /* PSB */
 #define PSB_PACKET_LENGTH 16

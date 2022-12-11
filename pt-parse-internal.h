@@ -1,55 +1,84 @@
 #ifndef PT_PARSE_INTERNAL_H_
 #define PT_PARSE_INTERNAL_H_
 
+#include "pt-parse-types.h"
+
 #include <stdbool.h>
+
 #include <vector>
+#include <optional>
+#include <stack>
 
-static unsigned long get_mapping(unsigned long host_pc);
-static void save_ip_mapping(unsigned long host_ip);
+static u64 get_mapping(u64 host_pc);
 
-static void log_basic_block(unsigned long id);
+static void log_basic_block(
+    pt_state& state, u64 id
+);
 
-static void load_output_file(char *file_name);
-static void load_trace_file(char *file_name);
-static void load_mapping_file(char *file_name);
-static void parse();
+static void print_packet_debug(
+    pt_packet& packet, pt_state& state
+);
 
-static bool parse_tnt(std::vector<bool>& tnt);
-static bool parse_tip(bool& use_next_tnt);
-static bool parse_pip(void);
-static bool parse_mode(void);
-static bool parse_trace_stop(void);
-static bool parse_cbr(void);
-static bool parse_tsc(void);
-static bool parse_mtc(void);
-static bool parse_tma(void);
-static bool parse_vmcs(void);
-static bool parse_ovf(void);
-static bool parse_cyc(void);
-static bool parse_psb(bool& in_psb_start);
-static bool parse_psb_end(bool& in_psb_start);
-static bool parse_mnt(void);
-static bool parse_pad(void);
-static bool parse_ptw(void);
-static bool parse_exstop(void);
-static bool parse_mwait(void);
-static bool parse_pwre(void);
-static bool parse_pwrx(void);
-static bool parse_bbp(void);
-static bool parse_bip(void);
-static bool parse_bep(void);
-static bool parse_cfe(void);
-static bool parse_evd(void);
+static void update_current_ip(
+    pt_state& state, u64 ip
+);
 
-static bool parse_tip_base(unsigned char *buffer);
-static bool parse_tip_pge(unsigned char *buffer);
-static bool parse_tip_pgd(unsigned char *buffer);
-static bool parse_tip_fup(unsigned char *buffer);
+static void handle_tip(pt_state& state);
 
-typedef struct mapping_node {
-    unsigned long key;
-    unsigned long value;
-    struct mapping_node *next;
-} mapping_node;
+static void follow_asm(pt_state& state);
 
+static bool get_next_instr(
+    pt_state& state, u64 ip, pt_instruction& instr
+);
+
+static pt_instruction_type jit_to_pt_instr_type(
+    jit_asm_type type
+);
+
+static bool can_follow_asm(pt_state& state);
+
+static void load_output_file(pt_state& state, const char *file_name);
+static void load_trace_file(pt_state& state, const char *file_name);
+static void load_mapping_file(const char *file_name);
+
+static void parse(pt_state& state);
+
+static std::optional<pt_packet> try_get_next_packet(pt_state& state);
+
+static inline pt_packet get_next_packet(pt_state& state, u64 curr_ip);
+static inline bool parse_short_tnt(pt_state& state, pt_packet& packet);
+static inline bool parse_long_tnt(pt_state& state, pt_packet& packet);
+static inline bool parse_tip(pt_state& state, pt_packet& packet, u64 curr_ip);
+static inline bool parse_pip(pt_state& state, pt_packet& packet);
+static inline bool parse_mode(pt_state& state, pt_packet& packet);
+static inline bool parse_trace_stop(pt_state& state, pt_packet& packet);
+static inline bool parse_cbr(pt_state& state, pt_packet& packet);
+static inline bool parse_tsc(pt_state& state, pt_packet& packet);
+static inline bool parse_mtc(pt_state& state, pt_packet& packet);
+static inline bool parse_tma(pt_state& state, pt_packet& packet);
+static inline bool parse_vmcs(pt_state& state, pt_packet& packet);
+static inline bool parse_ovf(pt_state& state, pt_packet& packet);
+static inline bool parse_cyc(pt_state& state, pt_packet& packet);
+static inline bool parse_psb(pt_state& state, pt_packet& packet);
+static inline bool parse_psb_end(pt_state& state, pt_packet& packet);
+static inline bool parse_mnt(pt_state& state, pt_packet& packet);
+static inline bool parse_pad(pt_state& state, pt_packet& packet);
+static inline bool parse_ptw(pt_state& state, pt_packet& packet);
+static inline bool parse_exstop(pt_state& state, pt_packet& packet);
+static inline bool parse_mwait(pt_state& state, pt_packet& packet);
+static inline bool parse_pwre(pt_state& state, pt_packet& packet);
+static inline bool parse_pwrx(pt_state& state, pt_packet& packet);
+static inline bool parse_bbp(pt_state& state, pt_packet& packet);
+static inline bool parse_bip(pt_state& state, pt_packet& packet);
+static inline bool parse_bep(pt_state& state, pt_packet& packet);
+static inline bool parse_cfe(pt_state& state, pt_packet& packet);
+static inline bool parse_evd(pt_state& state, pt_packet& packet);
+static inline void parse_unkown(pt_state& state, pt_packet& packet);
+
+static std::optional<pt_tip_type> parse_tip_type(u8 *buffer);
+static std::optional<u8> parse_tip_ip_use(u8 ip_bits);
+
+static void print_packet(const pt_packet& packet);
+static void print_tip(const pt_packet& packet);
+static void print_tnt(const pt_packet& packet);
 #endif
