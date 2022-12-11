@@ -27,8 +27,8 @@ static void handle_tip(pt_state& state);
 
 static void follow_asm(pt_state& state);
 
-static std::optional<pt_instruction> get_next_instr(
-    pt_state& state, u64 ip
+static bool get_next_instr(
+    pt_state& state, u64 ip, pt_instruction& instr
 );
 
 static pt_instruction_type jit_to_pt_instr_type(
@@ -37,9 +37,9 @@ static pt_instruction_type jit_to_pt_instr_type(
 
 static bool can_follow_asm(pt_state& state);
 
-static void load_output_file(pt_state& state, char *file_name);
-static void load_trace_file(pt_state& state, char *file_name);
-static void load_mapping_file(char *file_name);
+static void load_output_file(pt_state& state, const char *file_name);
+static void load_trace_file(pt_state& state, const char *file_name);
+static void load_mapping_file(const char *file_name);
 
 static void parse(pt_state& state);
 

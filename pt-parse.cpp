@@ -22,7 +22,7 @@
 static std::unordered_map<u64, u64> host_ip_to_guest_ip;
 static bool use_asm;
 
-//#define DEBUG_MODE_
+#define DEBUG_MODE_
 #define DEBUG_TIME_
 
 #ifdef DEBUG_MODE_ 
@@ -68,26 +68,24 @@ static void __load_data_into_buffer(pt_state& state);
 #define RETURN_IF_2(x, y) \
     if(x(state, packet, y)) return packet
 
-int main() 
-{
-    // TODO: change this to args
-    char asm_file_name[] =       "/home/rjw24/pt-trace-data/asm-trace.txt";
-    char trace_file_name[] =     "/home/rjw24/pt-trace-data/intel-pt-data.pt";
-    char mapping_file_name[] =   "/home/rjw24/pt-trace-data/mapping-data.mpt";
-    char trace_out_file_name[] = "/home/rjw24/pt-trace-data/trace.txt";
 
-    use_asm = true;
+void start(
+    const char* asm_file, const char* pt_trace_file, 
+    const char* mapping_file, const char* out_file, 
+    bool _use_asm
+){
+    use_asm = _use_asm;
     
-    load_mapping_file(mapping_file_name);
+    load_mapping_file(mapping_file);
 
     pt_state state; 
 
     if(use_asm) { 
-        asm_init(state.asm_parsing_state, asm_file_name);
+        asm_init(state.asm_parsing_state, asm_file);
     }
 
-    load_output_file(state, trace_out_file_name);
-    load_trace_file(state, trace_file_name);
+    load_output_file(state, out_file);
+    load_trace_file(state, pt_trace_file);
     
     parse(state);
 
@@ -98,8 +96,6 @@ int main()
     }
 
     fclose(state.out_file);
-
-    return 0;
 }
 
 
@@ -319,14 +315,16 @@ static inline void follow_asm(pt_state& state)
 
     while(can_continue && state.tracing_jit_code) {
         // Get the next instruction to follow 
-        auto maybe_instr = get_next_instr(state, state.current_ip);
+        pt_instruction instr;
 
-        if(!maybe_instr) {
+        auto parsed_instr = get_next_instr(
+            state, state.current_ip, instr
+        );
+
+        if(!parsed_instr) {
             can_continue = false;
             break;
         }
-
-        auto instr = *maybe_instr;
 
         // Follow this instruction 
         switch(instr.type) {
@@ -409,8 +407,10 @@ static inline void follow_asm(pt_state& state)
                 );
 
                 // return is not next instruction, but next again
+                pt_instruction i;
+
                 auto mi = get_next_instr(
-                    state, breakpoint_return_ip
+                    state, breakpoint_return_ip, i
                 );
 
                 if(!mi) {
@@ -418,7 +418,7 @@ static inline void follow_asm(pt_state& state)
                     exit(EXIT_FAILURE);
                 }
 
-                breakpoint_return_ip = (*mi).loc + 1;
+                breakpoint_return_ip = i.loc + 1;
             }
 
             state.breakpoint_return_ip = breakpoint_return_ip;
@@ -475,24 +475,33 @@ static inline void update_current_ip(
 
 /* Instructions */
 
-static inline std::optional<pt_instruction> get_next_instr(
-    pt_state& state, u64 ip
+static inline bool get_next_instr(
+    pt_state& state, u64 ip, pt_instruction& instruction
 ) {
     // Todo: Maybe add an option to check the next instruction
     //       is not outside of the current block 
-    if(!state.tracing_jit_code) return std::nullopt;
+    if(!state.tracing_jit_code) false;
     
     // Simple case jit instruction
     auto *instr = get_next_jit_instr(
         state.asm_parsing_state, ip
     );
 
-    if(instr == NULL) return std::nullopt;
+    if(instr == NULL) false;
 
-    return { pt_instruction(
-        jit_to_pt_instr_type(instr->type), false,
-        instr->loc, instr->des, instr->is_breakpoint
-    ) };
+    instruction.is_qemu_src = false;
+    instruction.type = jit_to_pt_instr_type(instr->type);
+    instruction.loc = instr->loc;
+    instruction.des = instr->des;
+    instruction.is_breakpoint = instr->is_breakpoint;
+
+
+    // return { pt_instruction(
+    //     jit_to_pt_instr_type(instr->type), false,
+    //     instr->loc, instr->des, instr->is_breakpoint
+    // ) };
+
+    return true;
 }
 
 
@@ -526,6 +535,7 @@ static std::optional<pt_packet> try_get_next_packet(pt_state& state)
 #ifdef DEBUG_TIME_
     static u8 last_percentage = -1;
 #endif
+    // Todo: need to move this out of the function into pt_state 
     static u64 last_tip_ip = 0;
 
 #ifdef DEBUG_MODE_
@@ -1334,7 +1344,7 @@ static void print_tnt(const pt_packet& packet)
 
 
 /* ***** File Management ***** */
-static void load_trace_file(pt_state& state, char *file_name)
+static void load_trace_file(pt_state& state, const char *file_name)
 {
     state.trace_data = fopen(file_name, "rb");
 
@@ -1394,7 +1404,7 @@ static void __load_data_into_buffer(pt_state& state)
 }
 
 
-static void load_mapping_file(char *file_name) 
+static void load_mapping_file(const char *file_name) 
 {
     FILE* mapping_data = fopen(file_name, "r");
 
@@ -1421,7 +1431,7 @@ static u64 get_mapping(u64 host_pc)
 }
 
 
-static void load_output_file(pt_state& state, char *file_name)
+static void load_output_file(pt_state& state, const char *file_name)
 {
     state.out_file = fopen(file_name, "w+");
 

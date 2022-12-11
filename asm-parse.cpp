@@ -15,7 +15,7 @@
 
 #include <chrono>
 
-// #define ASM_PARSE_DEBUG_
+#define ASM_PARSE_DEBUG_
 static u64 start_count = 0;
 
 void asm_init(asm_state& state, const char* asm_file_name) 

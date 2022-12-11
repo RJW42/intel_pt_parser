@@ -126,6 +126,7 @@ struct pt_instruction {
         bool is_breakpoint
     ) : type(type), is_qemu_src(is_qemu_src), loc(loc), des(des),
         is_breakpoint(is_breakpoint) {};
+    pt_instruction() {};
 };
 
 
