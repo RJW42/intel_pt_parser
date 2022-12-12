@@ -577,8 +577,7 @@ static inline pt_packet get_next_packet(pt_state& state, u64 curr_ip)
     
     RETURN_IF(parse_psb);
     RETURN_IF(parse_psb_end);
-    RETURN_IF(parse_short_tnt);
-    RETURN_IF(parse_long_tnt);
+    RETURN_IF(parse_tnt);
     RETURN_IF_2(parse_tip, curr_ip);
     RETURN_IF(parse_pip);
     RETURN_IF(parse_mode);
@@ -609,7 +608,26 @@ static inline pt_packet get_next_packet(pt_state& state, u64 curr_ip)
 }
 
 
-static inline bool parse_short_tnt(pt_state& state, pt_packet& packet)
+static inline bool parse_tnt(pt_state& state, pt_packet& packet) 
+{
+    u32 current_size = 0;
+
+    // Todo: if adding support for long tnt make the 7 47 or
+    // can deal with parings lon tnt then short if still space
+    while(current_size + 7 < TNT_PACKET_MAX_SIZE) {
+        if(!parse_short_tnt(state, packet, current_size) && 
+           !parse_long_tnt(state, packet, current_size)) {
+            break;
+        }
+    }
+
+    packet.tnt_data.size = current_size;
+
+    return current_size != 0;
+}
+
+
+static inline bool parse_short_tnt(pt_state& state, pt_packet& packet, u32& start_pos)
 {
     // Attempt to pase a short TNT packet
     if(!LEFT(SHORT_TNT_PACKET_LENGTH))
@@ -633,12 +651,14 @@ static inline bool parse_short_tnt(pt_state& state, pt_packet& packet)
 
     // Is Short TNT packet. Parse it's data
     tnt_packet_data& data = packet.tnt_data;
-    data.size = start_bit;
+    //data.size = start_bit;
 
     for(int i = start_bit - 1; i >= 0; i--) {
         bool taken = (byte & (0b10 << i));
-        data.tnt[start_bit - (i + 1)] = taken;
+        data.tnt[start_pos + start_bit - (i + 1)] = taken;
     }
+
+    start_pos += start_bit;
     
     ADVANCE(1);
 
@@ -647,7 +667,7 @@ static inline bool parse_short_tnt(pt_state& state, pt_packet& packet)
     return true;
 }
 
-static inline bool parse_long_tnt(pt_state& state, pt_packet& packet)
+static inline bool parse_long_tnt(pt_state& state, pt_packet& packet, u32& start_pos)
 {
      // Attempt to parse a Long TNT packet 
     if(!LEFT(LONG_TNT_PACKET_LENGTH)) 

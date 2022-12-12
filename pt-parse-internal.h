@@ -46,8 +46,9 @@ static void parse(pt_state& state);
 static std::optional<pt_packet> try_get_next_packet(pt_state& state);
 
 static inline pt_packet get_next_packet(pt_state& state, u64 curr_ip);
-static inline bool parse_short_tnt(pt_state& state, pt_packet& packet);
-static inline bool parse_long_tnt(pt_state& state, pt_packet& packet);
+static inline bool parse_tnt(pt_state& state, pt_packet& packet);
+static inline bool parse_short_tnt(pt_state& state, pt_packet& packet, u32& start_pos);
+static inline bool parse_long_tnt(pt_state& state, pt_packet& packet, u32& start_pos);
 static inline bool parse_tip(pt_state& state, pt_packet& packet, u64 curr_ip);
 static inline bool parse_pip(pt_state& state, pt_packet& packet);
 static inline bool parse_mode(pt_state& state, pt_packet& packet);
