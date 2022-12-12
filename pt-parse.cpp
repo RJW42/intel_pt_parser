@@ -22,7 +22,7 @@
 static std::unordered_map<u64, u64> host_ip_to_guest_ip;
 static bool use_asm;
 
-#define DEBUG_MODE_
+// #define DEBUG_MODE_
 #define DEBUG_TIME_
 
 #ifdef DEBUG_MODE_ 
@@ -307,6 +307,7 @@ static inline void follow_asm(pt_state& state)
     // Follow instructoins until either 
     //  1. A conditional jmp without a corisponding tnt is reached
     //  2. A call to qemu code is reached 
+    //  3. A direct jmp takes execution back to the qemu code (occours at the end of translated blocks)
 
      if(!state.tracing_jit_code)
         return; // Not in jitted code, no asm to follow
@@ -720,9 +721,9 @@ static inline bool parse_tip(pt_state& state, pt_packet& packet, u64 curr_ip)
 }  
 
 
-static std::optional<pt_tip_type> parse_tip_type(unsigned char *buffer)
+static std::optional<pt_tip_type> parse_tip_type(u8 *buffer)
 {
-    unsigned char bits = LOWER_BITS(buffer[0], TIP_OPPCODE_LENGTH_BITS);
+    u8 bits = LOWER_BITS(buffer[0], TIP_OPPCODE_LENGTH_BITS);
 
     switch (bits) {
     case TIP_BASE_OPPCODE:
@@ -1034,12 +1035,12 @@ static inline bool parse_ptw(pt_state& state, pt_packet& packet)
        LOWER_BITS(header[1], 5) != PTW_OPPCODE)
         return false;
 
-    unsigned char payload_bits = MIDDLE_BITS(header[1], 7, 5);
+    u8 payload_bits = MIDDLE_BITS(header[1], 7, 5);
 
     if(payload_bits != PTW_L1_CODE && payload_bits != PTW_L2_CODE)
         return false;
 
-    unsigned char packet_length = PTW_HEADER_LENGTH + 
+    u8 packet_length = PTW_HEADER_LENGTH + 
         (payload_bits == PTW_L1_CODE) ? PTW_BODY_LENGTH_1 : PTW_BODY_LENGTH_2;
 
     ADVANCE(packet_length);

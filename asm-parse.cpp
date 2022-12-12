@@ -15,7 +15,7 @@
 
 #include <chrono>
 
-#define ASM_PARSE_DEBUG_
+// #define ASM_PARSE_DEBUG_
 static u64 start_count = 0;
 
 void asm_init(asm_state& state, const char* asm_file_name) 
@@ -116,6 +116,7 @@ static inline void save_instruction(
     state.instructions.emplace(instr->loc, instr);
     bb->instructions.emplace(instr->loc, instr);    
 }
+
 
 void advance_to_ipt_start(asm_state& state)
 {
@@ -233,6 +234,8 @@ void advance_to_ipt_start(asm_state& state)
 }
 
 
+/* ******** Debuggin ********* */
+
 static inline void print_trace_element(trace_element& elmnt){
     switch(elmnt.type) {
     case BLOCK:
@@ -270,6 +273,8 @@ static inline void print_trace_element(trace_element& elmnt){
     }
 }
 
+
+/* ******* Parsing *******  */
 
 static inline bool parse_trace_element(std::string& l, trace_element& o) 
 {
