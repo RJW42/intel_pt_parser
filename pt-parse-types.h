@@ -9,7 +9,7 @@
 #include <vector>
 #include <bitset>
 
-#define TNT_PACKET_MAX_SIZE 188
+#define TNT_PACKET_MAX_SIZE 64
 
 enum pt_packet_type {  
     TNT,
@@ -52,7 +52,7 @@ enum pt_tip_type {
 
 
 struct tnt_packet_data {
-    u8 size;
+    u16 size;
     std::bitset<TNT_PACKET_MAX_SIZE> tnt;
 };
 

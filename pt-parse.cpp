@@ -87,7 +87,7 @@ void start(
     load_output_file(state, out_file);
     load_trace_file(state, pt_trace_file);
     
-    parse(state);
+    test(state);
 
     if(state.previous_guest_ip != 0) {
         // Record the lat basic block which may have 
@@ -612,9 +612,14 @@ static inline bool parse_tnt(pt_state& state, pt_packet& packet)
 {
     u32 current_size = 0;
 
+    if(!parse_short_tnt(state, packet, current_size) && 
+       !parse_long_tnt(state, packet, current_size)) {
+        return false;
+    }
+
     // Todo: if adding support for long tnt make the 7 47 or
     // can deal with parings lon tnt then short if still space
-    while(current_size + 7 < TNT_PACKET_MAX_SIZE) {
+    while(current_size + 6 < TNT_PACKET_MAX_SIZE) {
         if(!parse_short_tnt(state, packet, current_size) && 
            !parse_long_tnt(state, packet, current_size)) {
             break;
@@ -623,7 +628,11 @@ static inline bool parse_tnt(pt_state& state, pt_packet& packet)
 
     packet.tnt_data.size = current_size;
 
-    return current_size != 0;
+    if (current_size != 0) {
+        return true;
+    }
+    
+    return false;
 }
 
 
