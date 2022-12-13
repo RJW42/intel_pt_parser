@@ -18,7 +18,7 @@
 
 #include <chrono>
 
-#define ASM_PARSE_DEBUG_
+// #define ASM_PARSE_DEBUG_
 
 static u64 start_count = 0;
 
@@ -31,18 +31,83 @@ void asm_init(asm_state& state, const char* asm_file_name)
     if(parse_ ## x(y, z)) return true
 
 /* ***** JMP Management ***** */
+inline bool update_last_seen_block(asm_state& state, u64 current_ip);
 
 jit_asm_instruction* get_next_jit_instr(asm_state& state, u64 current_ip)
 {
-    // Todo: implement
-    return NULL;
+    // Search for the block contianing the instruction
+    if(!update_last_seen_block(state, current_ip)) return NULL;
+
+    // Search for the instruction in this block 
+    auto instr_iter = state.last_seen_block
+        ->instructions.lower_bound(current_ip);
+
+    if(instr_iter == state.last_seen_block->instructions.end()) {
+        printf(
+            "Errror: Failed to find next instruction for: 0x%lX\n", current_ip
+        ); 
+        fprintf(stderr, 
+            "Errror: Failed to find next instruction for: 0x%lX\n", current_ip
+        ); 
+        return NULL;
+    }
+
+    return instr_iter->second;
+}
+
+inline bool update_last_seen_block(asm_state& state, u64 current_ip) {
+    if(state.last_seen_block != NULL && (
+        current_ip >= state.last_seen_block->start_ip && 
+        current_ip <= state.last_seen_block->end_ip
+    )) {
+        // Ip is in the current block do nothing
+        return true;
+    }
+
+    // Ip is not in the current block update it 
+    auto block_iter = state.ordered_blocks.upper_bound(current_ip);
+
+    if(block_iter == state.ordered_blocks.begin() || (
+        current_ip > (--block_iter)->second->end_ip
+    )) {
+        // No block can be found for this ip address
+        fprintf(stderr, 
+            "Error: Failed to find block for: 0x%lX\n", current_ip
+        ); 
+        printf(
+            "Error: Failed to find block for: 0x%lX\n", current_ip
+        ); 
+        return false;
+    }
+
+    state.last_seen_block = block_iter->second;
+
+    return true;
 }
 
 
 bool ip_inside_block(asm_state& state, u64 ip) 
 {
-    // Todo: implememnt
-    return false;
+    if(state.last_seen_block != NULL && (
+        ip >= state.last_seen_block->start_ip && 
+        ip <= state.last_seen_block->end_ip
+    )) {
+        // Ip is in the current block do nothing
+        return true;
+    }
+    
+    auto block_iter = state.ordered_blocks.upper_bound(ip);
+
+    if(block_iter == state.ordered_blocks.begin() || (
+        ip > (--block_iter)->second->end_ip
+    )) {
+        // Ip is not within a block
+        return false;
+    }
+
+    state.last_seen_block = block_iter->second;
+
+    return true;
 }
 
 
@@ -187,7 +252,7 @@ static inline void handle_block_size(
             set_jump_destination(global_state, state, instr->not_taken_des);
             break;
         case JIT_CALL:
-            /* Noting needed, yet */
+            set_jump_destination(global_state, state, instr->return_des);
             break;
         }
     }   
@@ -278,7 +343,7 @@ static inline void set_jump_destination(
     if(!(
         destination.ip >= state.current_block->start_ip && 
         destination.ip <= state.current_block->end_ip)
-    ) {
+    ){
         // Jump to a new block 
         auto block = global_state.unordered_blocks.find(destination.ip);
 
@@ -292,6 +357,15 @@ static inline void set_jump_destination(
 
         destination.type = NEW_BLOCK;
         destination.next_block = block->second;
+        destination.next_instr = block->second->instructions.begin()->second;
+        return;
+    }
+
+    if (destination.ip == state.current_block->start_ip) {
+        // Jump to the start of this block
+        destination.type = NEW_BLOCK;
+        destination.next_block = state.current_block;
+        destination.next_instr = state.current_block->instructions.begin()->second;
         return;
     }
 
@@ -302,6 +376,7 @@ static inline void set_jump_destination(
 
     destination.type = SAME_BLOCK;
     destination.next_instr = next_instr;
+    destination.next_block = NULL;
 }
 
 
@@ -393,6 +468,7 @@ static inline void handle_call(
     instr->type = JIT_CALL;
     instr->ip = state.current_element.loc;
     instr->is_breakpoint = state.current_element.is_breakpoint;
+    instr->return_des.ip = state.current_element.loc + 1;
     instr->block = state.current_block;
 
     save_instruction(global_state, state, instr);
@@ -418,7 +494,7 @@ static inline void handle_label(
     instr->type = JIT_JXX;
     instr->ip = jxx.loc;
     instr->taken_des.ip = state.current_element.loc;
-    instr->not_taken_des.ip = state.current_element.loc + 1;
+    instr->not_taken_des.ip = jxx.loc + 1;
     instr->block = state.current_block;
 
     save_instruction(global_state, state, instr);

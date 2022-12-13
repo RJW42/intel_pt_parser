@@ -21,7 +21,6 @@ struct advance_state {
     /* The current element in the asm log being delt with */
     trace_element current_element;
 
-
     advance_state() : current_block(NULL) {};
 };
 

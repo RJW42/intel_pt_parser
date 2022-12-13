@@ -1,6 +1,7 @@
 #include "types.h"
 
 #include "asm-parse.h"
+#include "asm-types.h"
 
 #include "mapping-parse.h"
 
@@ -88,7 +89,7 @@ void start(
     load_output_file(state, out_file);
     load_trace_file(state, pt_trace_file);
     
-    test(state);
+    parse(state);
 
     if(state.previous_guest_ip != 0) {
         // Record the lat basic block which may have 
@@ -320,36 +321,37 @@ static inline void follow_asm(pt_state& state)
         return; // Not in jitted code, no asm to follow
 
     bool can_continue = true;
+    jit_asm_instruction* instr = NULL;
+    jit_asm_instruction* next_instr = get_next_instr(state, state.current_ip, instr);
 
     while(can_continue && state.tracing_jit_code) {
-        // Get the next instruction to follow 
-        pt_instruction instr;
+        // Follow next instruction
+        instr = next_instr;
+        next_instr = NULL;
 
-        auto parsed_instr = get_next_instr(
-            state, state.current_ip, instr
-        );
-
-        if(!parsed_instr) {
+        if(instr == NULL) {
             can_continue = false;
             break;
         }
 
         // Follow this instruction 
-        switch(instr.type) {
-        case PT_JMP: // Follow this jump 
+        switch(instr->type) {
+        case JIT_JMP: // Follow this jump 
             printf_debug(
-                "  TU. 0x%lX jmp 0x%lX\n", instr.loc, instr.des
+                "  TU. 0x%lX jmp 0x%lX\n", 
+                instr->ip, instr->des.ip
             );
 
-            if(instr.des == state.qemu_return_ip) {
+            if(instr->des.ip == state.qemu_return_ip) {
                 printf_debug("    JMP. leaving jit code\n");
                 // Leaving jit code, cannot continue to follow asm
                 // this will be updated in the state by update_current_ip
             }
 
-            update_current_ip(
-                state, instr.des
+            update_current_ip_from_destination(
+                state, instr->des
             );
+            next_instr = instr->des.next_instr;
 
             // Set this to help us back track in the event
             // that a psb-fup-psbend event is sent inbetween 
@@ -357,7 +359,7 @@ static inline void follow_asm(pt_state& state)
             state.last_ip_was_reached_by_u_jump = true;
             
             break;
-        case PT_JXX: // Follow this conditional jump
+        case JIT_JXX: // Follow this conditional jump
             if(!has_tnt || tnt_packet_p >= tnt_packet->size) {
                 // Need more tnt packet data to continue 
                 can_continue = false;
@@ -370,10 +372,12 @@ static inline void follow_asm(pt_state& state)
 
             if(!tnt_packet->tnt[tnt_packet_p++]) {
                 // Conditional jump is not taken
-                state.current_ip = instr.loc + 1;
+                state.current_ip = instr->not_taken_des.ip;
+                next_instr = instr->not_taken_des.next_instr;
 
                 printf_debug(
-                    "  NT. 0x%lX jxx 0x%lX\n", instr.loc, instr.des
+                    "  NT. 0x%lX jxx 0x%lX\n", 
+                    instr->ip, instr->des.ip
                 );
 
                 break;
@@ -381,52 +385,52 @@ static inline void follow_asm(pt_state& state)
 
             // Conditional jump is taken
             printf_debug(
-                "  TC. 0x%lX jxx 0x%lX\n", instr.loc, instr.des
+                "  TC. 0x%lX jxx 0x%lX\n", 
+                instr->ip, instr->taken_des.ip
             );
 
-            if(instr.des == state.qemu_return_ip) {
+            if(instr->taken_des.ip == state.qemu_return_ip) {
                 printf_debug("    JMP. leaving jit code\n");
                 // Leaving jit code, cannot continue to follow asm
                 // this will be updated in the state by update_current_ip
             }
 
-            update_current_ip(
-                state, instr.des
+            update_current_ip_from_destination(
+                state, instr->taken_des
             );
+            next_instr = instr->taken_des.next_instr;
             break;
-        case PT_CALL: { // Handle this call
+        case JIT_CALL: { // Handle this call
             // TODO: Need to move the first instance of the call to the first basic block
 
             // Cannot continue to follow calls 
             can_continue = false;
 
-            u64 breakpoint_return_ip = instr.loc + 1;
+            u64 breakpoint_return_ip = instr->ip + 1;
 
 
-            if(instr.is_breakpoint) {
+            if(instr->is_breakpoint) {
                 printf_debug(
-                    "  TU. 0x%lX call breakpoint\n", instr.loc
+                    "  TU. 0x%lX call breakpoint\n", instr->ip
                 );
                 
                 state.next_tip_is_breakpoint = true;
             } else {
                 printf_debug(
-                    "  TU. 0x%lX call qemu\n", instr.loc
+                    "  TU. 0x%lX call qemu\n", instr->ip
                 );
 
                 // return is not next instruction, but next again
-                pt_instruction i;
+                auto next_instr = instr->return_des.next_instr;
 
-                auto mi = get_next_instr(
-                    state, breakpoint_return_ip, i
-                );
-
-                if(!mi) {
-                    printf("    Error: qemu call is not followed by breakpoint\n");
+                if(next_instr == NULL) {
+                    printf(
+                        "    Error: qemu call is not followed by breakpoint\n"
+                    );
                     exit(EXIT_FAILURE);
                 }
 
-                breakpoint_return_ip = i.loc + 1;
+                breakpoint_return_ip = next_instr->ip + 1;
             }
 
             state.breakpoint_return_ip = breakpoint_return_ip;
@@ -473,54 +477,60 @@ static inline void update_current_ip(
     if(!state.tracing_jit_code && use_asm) {
         printf(
             "    Error: The block containing the above ip"
-            " has not been translated: 0x%lx\n", guest_ip
+            " has not been translated: g:0x%lx, h:0x%lX\n", 
+            guest_ip, state.current_ip
         );
         exit(EXIT_FAILURE);
     }   
 }
 
 
+static void update_current_ip_from_destination(
+    pt_state& state, jmp_destination& des
+) {
+    state.last_ip_was_reached_by_u_jump = false; // reset 
+
+    switch(des.type) {
+    case RETURN_TO_QEMU: 
+        state.current_ip = des.ip;
+        state.tracing_jit_code = false;
+        state.last_ip_had_mapping = false;
+        break;
+    case NEW_BLOCK:
+        state.current_ip = des.ip;
+        state.last_ip_had_mapping = true;
+        log_basic_block(state, des.next_block->guest_ip);
+        state.tracing_jit_code = true;
+        state.asm_parsing_state.last_seen_block = des.next_block;
+        break;
+    case SAME_BLOCK:
+        state.current_ip = des.ip;
+        state.tracing_jit_code = true;
+        state.last_ip_had_mapping = false;
+        break;
+    case COMPUTED:
+        /* Can't do anything */
+        state.tracing_jit_code = false;
+        state.last_ip_had_mapping = false;
+        break;
+    }
+}
+
+
 
 /* Instructions */
 
-static inline bool get_next_instr(
-    pt_state& state, u64 ip, pt_instruction& instruction
+static inline jit_asm_instruction* get_next_instr(
+    pt_state& state, u64 ip, jit_asm_instruction* last_instr
 ) {
-    // Todo: Maybe add an option to check the next instruction
-    //       is not outside of the current block 
-    if(!state.tracing_jit_code) false;
+    if(!state.tracing_jit_code) return NULL;
     
     // Simple case jit instruction
     auto *instr = get_next_jit_instr(
         state.asm_parsing_state, ip
     );
 
-    if(instr == NULL) false;
-
-    instruction.is_qemu_src = false;
-    instruction.type = jit_to_pt_instr_type(instr->type);
-    instruction.loc = instr->ip;
-    instruction.des = instr->des.ip;
-    instruction.is_breakpoint = instr->is_breakpoint;
-
-
-    // return { pt_instruction(
-    //     jit_to_pt_instr_type(instr->type), false,
-    //     instr->loc, instr->des, instr->is_breakpoint
-    // ) };
-
-    return true;
-}
-
-
-static inline pt_instruction_type jit_to_pt_instr_type(
-    jit_asm_type type
-) {
-    switch (type) {
-    case JIT_JXX: return PT_JXX;
-    case JIT_JMP: return PT_JMP;
-    case JIT_CALL: return PT_CALL;
-    }
+    return instr;
 }
 
 
@@ -566,7 +576,7 @@ static std::optional<pt_packet> try_get_next_packet(pt_state& state)
     pt_packet packet = get_next_packet(state, last_tip_ip);
 
 #ifdef DEBUG_MODE_
-    if(packet.type != PAD) printf("OFST: %u: ", old_offset);
+    if(packet.type != PAD) printf("OFST: %lu: ", old_offset);
 #endif
 
     if(packet.type == TIP) {

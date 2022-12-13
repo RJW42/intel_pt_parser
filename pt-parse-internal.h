@@ -2,6 +2,7 @@
 #define PT_PARSE_INTERNAL_H_
 
 #include "pt-parse-types.h"
+#include "asm-types.h"
 
 #include <stdbool.h>
 
@@ -20,17 +21,16 @@ static void print_packet_debug(
 static void update_current_ip(
     pt_state& state, u64 ip
 );
+static void update_current_ip_from_destination(
+    pt_state& state, jmp_destination& des
+);
 
 static void handle_tip(pt_state& state);
 
 static void follow_asm(pt_state& state);
 
-static bool get_next_instr(
-    pt_state& state, u64 ip, pt_instruction& instr
-);
-
-static pt_instruction_type jit_to_pt_instr_type(
-    jit_asm_type type
+static jit_asm_instruction* get_next_instr(
+    pt_state& state, u64 ip, jit_asm_instruction* last_instr
 );
 
 static bool can_follow_asm(pt_state& state);

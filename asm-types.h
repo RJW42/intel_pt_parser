@@ -21,13 +21,10 @@ enum jmp_destination_type {
 struct jmp_destination {
     jmp_destination_type type;
     
-    /* Note: for a computed jump the destination is 0 */
-    u64 ip; 
+    u64 ip; /* Note: for a computed jump the destination is 0 */
 
-    union { /* Can't forward decalre types so needs to be void* */
-        translated_block* next_block; /* New Block */
-        jit_asm_instruction* next_instr; /* Same Block */
-    };
+    translated_block* next_block; /* New Block */
+    jit_asm_instruction* next_instr; /* New Block & Same Block */
 };
 
 
@@ -44,11 +41,14 @@ struct jit_asm_instruction {
     u64 ip;
 
     union {
-        bool is_breakpoint; /* CALL */
         jmp_destination des; /* JMP */
         struct { /* JXX */
             jmp_destination taken_des;
             jmp_destination not_taken_des;
+        };
+        struct { /* CALL */
+            bool is_breakpoint; 
+            jmp_destination return_des; /* Todo: implement this */
         };
     };
 };
@@ -119,7 +119,13 @@ struct asm_state {
     * direct jump in a translated block */
    u64 qemu_return_ip;
 
-   asm_state() : qemu_return_ip(0) {}
+   /* Stores the last seen block in an attempt to make 
+    * searching for the next instruction faster */
+   translated_block* last_seen_block;
+
+   asm_state() : 
+    qemu_return_ip(0),
+    last_seen_block(NULL) {}
 };
 
 #endif
