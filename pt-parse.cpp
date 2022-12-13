@@ -2,6 +2,8 @@
 
 #include "asm-parse.h"
 
+#include "mapping-parse.h"
+
 #include "pt-parse-types.h"
 #include "pt-parse-internal.h"
 #include "pt-parse-oppcode.h"
@@ -12,14 +14,12 @@
 #include <string.h>
 
 #include <vector>
-#include <unordered_map>
 #include <iostream>
 #include <ostream>
 #include <optional>
 #include <stack>
 
 
-static std::unordered_map<u64, u64> host_ip_to_guest_ip;
 static bool use_asm;
 
 // #define DEBUG_MODE_
@@ -68,6 +68,7 @@ static void __load_data_into_buffer(pt_state& state);
 #define RETURN_IF_2(x, y) \
     if(x(state, packet, y)) return packet
 
+void test(pt_state& state);
 
 void start(
     const char* asm_file, const char* pt_trace_file, 
@@ -87,7 +88,7 @@ void start(
     load_output_file(state, out_file);
     load_trace_file(state, pt_trace_file);
     
-    parse(state);
+    test(state);
 
     if(state.previous_guest_ip != 0) {
         // Record the lat basic block which may have 
@@ -96,6 +97,14 @@ void start(
     }
 
     fclose(state.out_file);
+}
+
+
+void test(pt_state& state) 
+{
+    while(true) {
+        advance_to_ipt_start(state.asm_parsing_state);
+    }
 }
 
 
@@ -247,9 +256,7 @@ static inline void handle_tip(pt_state& state)
         // current ip the first basic block of asm will be parsed 
         // we can use this to get the qemu_return_ip, jumped to prior to 
         // leaving jit code. It is always the last jmp in a block 
-        state.qemu_return_ip = get_last_jmp_loc(
-            state.asm_parsing_state
-        );
+        state.qemu_return_ip = state.asm_parsing_state.qemu_return_ip;
 
         printf_debug(
             "  Setting: qemu_return_ip: 0x%lX\n", state.qemu_return_ip
@@ -492,8 +499,8 @@ static inline bool get_next_instr(
 
     instruction.is_qemu_src = false;
     instruction.type = jit_to_pt_instr_type(instr->type);
-    instruction.loc = instr->loc;
-    instruction.des = instr->des;
+    instruction.loc = instr->ip;
+    instruction.des = instr->des.ip;
     instruction.is_breakpoint = instr->is_breakpoint;
 
 
@@ -1403,34 +1410,6 @@ static void __load_data_into_buffer(pt_state& state)
 
     _pos_in_buffer = 0; // Reset local position
 }
-
-
-static void load_mapping_file(const char *file_name) 
-{
-    FILE* mapping_data = fopen(file_name, "r");
-
-    if(mapping_data == NULL) {
-        fprintf(stderr, "Failed to open data file: %s\n", file_name);
-        exit(EXIT_FAILURE);
-    }
-
-    // Read Data 
-    unsigned long guest_pc;
-    unsigned long host_pc;
-
-    while(fscanf(mapping_data, "%lX, %lX\n", &guest_pc, &host_pc) != EOF) {
-        host_ip_to_guest_ip[host_pc] = guest_pc;
-    }
-
-    fclose(mapping_data);
-}
-
-
-static u64 get_mapping(u64 host_pc) 
-{
-    return host_ip_to_guest_ip[host_pc];   
-}
-
 
 static void load_output_file(pt_state& state, const char *file_name)
 {

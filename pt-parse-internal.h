@@ -9,8 +9,6 @@
 #include <optional>
 #include <stack>
 
-static u64 get_mapping(u64 host_pc);
-
 static void log_basic_block(
     pt_state& state, u64 id
 );
@@ -39,7 +37,6 @@ static bool can_follow_asm(pt_state& state);
 
 static void load_output_file(pt_state& state, const char *file_name);
 static void load_trace_file(pt_state& state, const char *file_name);
-static void load_mapping_file(const char *file_name);
 
 static void parse(pt_state& state);
 
