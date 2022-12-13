@@ -158,6 +158,9 @@ struct pt_state {
     /* The ip in jitted code to jump to after a breakpoint call */
     u64 breakpoint_return_ip;
 
+    /* A more efficient implementation of the above field */
+    jmp_destination* breakpoint_return_des;
+
     /* Store the last seen intel pt packet */
     pt_packet *last_packet;
 
@@ -221,6 +224,7 @@ struct pt_state {
         qemu_return_ip(0),
         pad_count(0), 
         breakpoint_ip(0),
+        breakpoint_return_des(NULL),
         breakpoint_return_ip(0),
         last_packet(NULL),
         in_psb(false),

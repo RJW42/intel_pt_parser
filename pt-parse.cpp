@@ -289,6 +289,7 @@ static inline void follow_asm(pt_state& state)
     u32 tnt_packet_p = 0;
     tnt_packet_data *tnt_packet = has_tnt ? 
         &state.last_packet->tnt_data : NULL;
+    jit_asm_instruction* next_instr = NULL;
 
     // Check if we have just exited a breakpoint
     if(state.last_tip_was_breakpoint) {
@@ -304,11 +305,13 @@ static inline void follow_asm(pt_state& state)
 
         // can return from this breakpoint call
         state.last_tip_was_breakpoint = false;
-
         state.last_ip_was_reached_by_u_jump = false;
 
-        update_current_ip(
-            state, state.breakpoint_return_ip
+        next_instr = state.breakpoint_return_des->next_instr;
+        jmp_destination des = *state.breakpoint_return_des;
+
+        update_current_ip_from_destination(
+            state, des
         );
     }
 
@@ -317,12 +320,14 @@ static inline void follow_asm(pt_state& state)
     //  2. A call to qemu code is reached 
     //  3. A direct jmp takes execution back to the qemu code (occours at the end of translated blocks)
 
-     if(!state.tracing_jit_code)
+    if(!state.tracing_jit_code)
         return; // Not in jitted code, no asm to follow
 
     bool can_continue = true;
     jit_asm_instruction* instr = NULL;
-    jit_asm_instruction* next_instr = get_next_instr(state, state.current_ip, instr);
+
+    if (next_instr == NULL)
+        next_instr =  get_next_instr(state, state.current_ip);
 
     while(can_continue && state.tracing_jit_code) {
         // Follow next instruction
@@ -407,6 +412,7 @@ static inline void follow_asm(pt_state& state)
             can_continue = false;
 
             u64 breakpoint_return_ip = instr->ip + 1;
+            jmp_destination* breakpoint_return_des = &instr->return_des;
 
 
             if(instr->is_breakpoint) {
@@ -431,9 +437,11 @@ static inline void follow_asm(pt_state& state)
                 }
 
                 breakpoint_return_ip = next_instr->ip + 1;
+                breakpoint_return_des = &next_instr->return_des;
             }
 
             state.breakpoint_return_ip = breakpoint_return_ip;
+            state.breakpoint_return_des = breakpoint_return_des;
 
             break;
         } }
@@ -521,7 +529,7 @@ static void update_current_ip_from_destination(
 /* Instructions */
 
 static inline jit_asm_instruction* get_next_instr(
-    pt_state& state, u64 ip, jit_asm_instruction* last_instr
+    pt_state& state, u64 ip
 ) {
     if(!state.tracing_jit_code) return NULL;
     

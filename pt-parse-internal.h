@@ -30,7 +30,7 @@ static void handle_tip(pt_state& state);
 static void follow_asm(pt_state& state);
 
 static jit_asm_instruction* get_next_instr(
-    pt_state& state, u64 ip, jit_asm_instruction* last_instr
+    pt_state& state, u64 ip
 );
 
 static bool can_follow_asm(pt_state& state);
