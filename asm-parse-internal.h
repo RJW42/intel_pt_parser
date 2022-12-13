@@ -5,18 +5,19 @@
 #include <stdbool.h>
 
 #include <string>
-#include <unordered_map>
 
 #include "types.h"
 #include "asm-parse.h"
 #include "asm-types.h"
+
+#include "robbin_hood.h"
 
 struct advance_state {
     /* Track the current tb being parced */
     translated_block *current_block;
     
     /* Track jumps waiting for a label*/
-    std::unordered_map<u32, trace_element> unset_jxx; 
+    robin_hood::unordered_map<u32, trace_element> unset_jxx; 
 
     /* The current element in the asm log being delt with */
     trace_element current_element;

@@ -4,9 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <unordered_map>
+#include "robbin_hood.h"
 
-static std::unordered_map<u64, u64> host_ip_to_guest_ip;
+static robin_hood::unordered_flat_map<u64, u64> host_ip_to_guest_ip;
 
 u64 get_mapping(u64 host_pc) 
 {

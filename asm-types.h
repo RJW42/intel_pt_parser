@@ -5,7 +5,7 @@
 #include <iostream>
 
 #include <map>
-#include <unordered_map>
+#include "robbin_hood.h"
 
 struct translated_block;
 struct jit_asm_instruction;
@@ -104,12 +104,12 @@ struct trace_element {
 struct asm_state {
    /* A map from start addresss to each basic block */
    std::map<u64, translated_block*> ordered_blocks;
-   std::unordered_map<u64, translated_block*> unordered_blocks;
+   robin_hood::unordered_flat_map<u64, translated_block*> unordered_blocks;
 
    /* A complete list of all instructions at a given address 
     * storing them as both unordered and ordered map helps lookup times */
    std::map<u64, jit_asm_instruction*> ordered_instructions;
-   std::unordered_map<u64, jit_asm_instruction*> unordered_instructions;
+   robin_hood::unordered_flat_map<u64, jit_asm_instruction*> unordered_instructions;
 
    /* File storing assmebly code needing parsed */
    std::ifstream asm_file;
