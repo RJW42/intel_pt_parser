@@ -89,6 +89,9 @@ void start(
     load_output_file(state, out_file);
     load_trace_file(state, pt_trace_file);
     
+    // mcr
+    // time normal 14m 22s
+    // time test 2m 30s
     parse(state);
 
     if(state.previous_guest_ip != 0) {
@@ -103,8 +106,25 @@ void start(
 
 void test(pt_state& state) 
 {
-    while(true) {
-        advance_to_ipt_start(state.asm_parsing_state);
+    int count = 0;
+    u64 current_ip = 0;
+    u8 last_percentage = -1;
+
+    pt_packet packet(UNKOWN);
+
+    while(state.offset < state.size) {
+        if((u8)(((double)state.offset / state.size) * 100) != last_percentage) {
+            last_percentage = ((double)state.offset / state.size) * 100;
+            fprintf(stderr, "TIME: %u%%\n", last_percentage);
+            printf("TIME: %u%%\n", last_percentage);
+        }
+
+        if(!parse_psb(state, packet)) {
+            state.offset += 1;
+            continue;
+        }
+
+        count += 1;
     }
 }
 

@@ -23,9 +23,8 @@ void load_mapping_file(const char *file_name)
         exit(EXIT_FAILURE);
     }
 
-    // Read Data 
-    unsigned long guest_pc;
-    unsigned long host_pc;
+    u64 guest_pc;
+    u64 host_pc;
 
     while(fscanf(mapping_data, "%lX, %lX\n", &guest_pc, &host_pc) != EOF) {
         host_ip_to_guest_ip[host_pc] = guest_pc;
