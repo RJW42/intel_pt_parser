@@ -45,9 +45,6 @@ static bool use_asm;
 
 #define BUFFER_SIZE 1073741824
 
-static u8 _buffer[BUFFER_SIZE];
-static u32 _pos_in_buffer = 0;
-
 static void __advance(pt_state& state, u8 n);
 static void __get_bytes(pt_state& state, u8 *buffer, u8 n);
 static void __load_data_into_buffer(pt_state& state);
@@ -56,10 +53,10 @@ static void __load_data_into_buffer(pt_state& state);
 #define ADVANCE(n) __advance(state, n)
 #define GET_BYTES(buffer, size) __get_bytes(state, buffer, size)
 #define INIT_BUFFER(name, size) \
-    if(_pos_in_buffer + size > BUFFER_SIZE) {  \
+    if(state.pos_in_buffer + size > BUFFER_SIZE) {  \
         __load_data_into_buffer(state); \
     } \
-    u8 *name = _buffer + _pos_in_buffer;
+    u8 *name = state.buffer + state.pos_in_buffer;
 
 #define LOWER_BITS(value, n) (value & ((1 << n) - 1))
 #define MIDDLE_BITS(value, uppwer, lower) (value & (((1 << uppwer) - 1) << lower))
@@ -69,30 +66,32 @@ static void __load_data_into_buffer(pt_state& state);
 #define RETURN_IF_2(x, y) \
     if(x(state, packet, y)) return packet
 
+
 void test(pt_state& state);
+
 
 void start(
     const char* asm_file, const char* pt_trace_file, 
     const char* mapping_file, const char* out_file, 
+    u64 start_offset, u64 end_offset,
     bool _use_asm
 ){
     use_asm = _use_asm;
-    
-    load_mapping_file(mapping_file);
 
     pt_state state; 
+
+    load_mapping_file(state.mapping_state, mapping_file);
 
     if(use_asm) { 
         asm_init(state.asm_parsing_state, asm_file);
     }
 
     load_output_file(state, out_file);
-    load_trace_file(state, pt_trace_file);
-    
-    // mcr
-    // time normal 14m 22s
-    // time test 2m 30s
-    parse(state);
+    load_trace_file(state, pt_trace_file, start_offset);
+
+    state.end_offset = end_offset;
+
+    test(state);
 
     if(state.previous_guest_ip != 0) {
         // Record the lat basic block which may have 
@@ -103,28 +102,18 @@ void start(
     fclose(state.out_file);
 }
 
+void advance_to_first_psb(
+    pt_state& state
+) {
+    std::optional<pt_packet> maybe_packet;
 
-void test(pt_state& state) 
-{
-    int count = 0;
-    u64 current_ip = 0;
-    u8 last_percentage = -1;
+    while((maybe_packet = try_get_next_packet(state))) {
+        pt_packet packet = *maybe_packet;
 
-    pt_packet packet(UNKOWN);
-
-    while(state.offset < state.size) {
-        if((u8)(((double)state.offset / state.size) * 100) != last_percentage) {
-            last_percentage = ((double)state.offset / state.size) * 100;
-            fprintf(stderr, "TIME: %u%%\n", last_percentage);
-            printf("TIME: %u%%\n", last_percentage);
+        if(packet.type == PSB) {
+            state.in_psb = true;
+            break;
         }
-
-        if(!parse_psb(state, packet)) {
-            state.offset += 1;
-            continue;
-        }
-
-        count += 1;
     }
 }
 
@@ -135,6 +124,8 @@ void parse(pt_state& state)
     printf(" -------- Intel PT Start ---------- \n\n");
     printf("Size: %lu\n", state.size);
 #endif
+
+    advance_to_first_psb(state);
 
     std::optional<pt_packet> maybe_packet;
 
@@ -161,6 +152,10 @@ void parse(pt_state& state)
         // Handle this packet 
         if(packet.type == PSB) {
             state.in_psb = true;
+
+            if (state.offset > state.end_offset) {
+                return;
+            }
         } else if(packet.type == PSBEND) {
             state.in_psb = false;
         } else if(packet.type == TIP) {
@@ -184,6 +179,40 @@ void parse(pt_state& state)
     }
 }
 
+void test(pt_state& state) 
+{
+    advance_to_first_psb(state);
+
+    std::optional<pt_packet> maybe_packet;
+
+    while((maybe_packet = try_get_next_packet(state))) {
+        pt_packet packet = *maybe_packet;
+
+        state.last_packet = &packet;
+
+        if(packet.type == PSB) {
+            state.in_psb = true;
+
+            if (state.offset > state.end_offset) {
+                return;
+            }
+        } else if(packet.type == PSBEND) {
+            state.in_psb = false;
+        } else if(packet.type == TIP) {
+            handle_tip(state);
+        }
+
+        state.last_was_mode = false;
+        state.last_was_ovf = false;
+
+        if(packet.type == MODE) {
+            state.last_was_mode = true;
+        } else if(packet.type == OVF) {
+            state.last_was_ovf = true;
+        }
+    }
+}
+
 
 static inline void handle_tip(pt_state& state) 
 {
@@ -192,33 +221,33 @@ static inline void handle_tip(pt_state& state)
 
     tip_packet_data *tip_data = &state.last_packet->tip_data;
 
-    state.last_tip_was_breakpoint = 
-        tip_data->ip == state.breakpoint_ip;
+    // state.last_tip_was_breakpoint = 
+    //     tip_data->ip == state.breakpoint_ip;
         // If a call to the breakpoint has been made record this in 
         // the state so it can be used to continue to follow asm
 
-    if(tip_data->type == TIP_TIP && state.breakpoint_ip == 0 &&
-       state.next_tip_is_breakpoint) {
-        // This is the first call to the breakpoint functoin. We can 
-        // use this ip to record it for future use 
-        state.breakpoint_ip = tip_data->ip;
-        state.last_tip_was_breakpoint = true;
+    // if(tip_data->type == TIP_TIP && state.breakpoint_ip == 0 &&
+    //    state.next_tip_is_breakpoint) {
+    //     // This is the first call to the breakpoint functoin. We can 
+    //     // use this ip to record it for future use 
+    //     state.breakpoint_ip = tip_data->ip;
+    //     state.last_tip_was_breakpoint = true;
 
-        printf_debug(
-            "  Setting: breakpoint_ip: 0x%lX\n", state.breakpoint_ip
-        );
-    }
+    //     printf_debug(
+    //         "  Setting: breakpoint_ip: 0x%lX\n", state.breakpoint_ip
+    //     );
+    // }
 
 
-    if(tip_data->type == TIP_TIP && state.qemu_caller_ip == 0) {
-        // This is the first TIP packet of the trace. We can use 
-        // this ip as the qemu_call_ip, called after every ipt_start 
-        state.qemu_caller_ip = tip_data->ip;
+    // if(tip_data->type == TIP_TIP && state.qemu_caller_ip == 0) {
+    //     // This is the first TIP packet of the trace. We can use 
+    //     // this ip as the qemu_call_ip, called after every ipt_start 
+    //     state.qemu_caller_ip = tip_data->ip;
         
-        printf_debug(
-            "  Setting: qemu_caller_ip: 0x%lX\n", state.qemu_caller_ip
-        );
-    }
+    //     printf_debug(
+    //         "  Setting: qemu_caller_ip: 0x%lX\n", state.qemu_caller_ip
+    //     );
+    // }
     
 
     if(tip_data->type == TIP_FUP &&
@@ -237,17 +266,17 @@ static inline void handle_tip(pt_state& state)
         was_in_fup = true;
     }
 
-    if((state.last_ip_was_reached_by_u_jump &&
-       state.last_ip_had_mapping && (state.in_psb || state.in_fup)) || (
-        was_in_fup && state.last_ip_had_mapping && 
-        state.last_tip_ip == tip_data->ip && 
-        state.last_tip_ip == state.current_ip
-       )) {
-        // Want to remove the last ip from the record has we will
-        // reach it again. This may not be entierly true tbh 
-        printf_debug("  NOTE: Removing previous block from save\n");
-        state.previous_guest_ip = 0;
-    }
+    // if((state.last_ip_was_reached_by_u_jump &&
+    //    state.last_ip_had_mapping && (state.in_psb || state.in_fup)) || (
+    //     was_in_fup && state.last_ip_had_mapping && 
+    //     state.last_tip_ip == tip_data->ip && 
+    //     state.last_tip_ip == state.current_ip
+    //    )) {
+    //     // Want to remove the last ip from the record has we will
+    //     // reach it again. This may not be entierly true tbh 
+    //     printf_debug("  NOTE: Removing previous block from save\n");
+    //     state.previous_guest_ip = 0;
+    // }
 
     if(state.in_fup) { // Cannot update current ip
         printf_debug("  IN FUP\n");
@@ -260,32 +289,33 @@ static inline void handle_tip(pt_state& state)
         // We have resived a refresh of the current ip, but it 
         // is the same as the current. This will cuase a log to 
         // occour twice, we don't want that. 
-        update_ip = false;
+        // update_ip = false;
+        return;
     }
 
 
     // Can update the current ip 
-    if(update_ip) {
+    // if(update_ip) {
         state.last_tip_ip = tip_data->ip;
         update_current_ip(state, tip_data->ip);
-    }
+    // }
 
 
-    if(tip_data->ip == state.qemu_caller_ip && 
-       state.qemu_return_ip == 0 && use_asm) {
-        // If we have just set the qemu_caller_ip, after updating the 
-        // current ip the first basic block of asm will be parsed 
-        // we can use this to get the qemu_return_ip, jumped to prior to 
-        // leaving jit code. It is always the last jmp in a block 
-        state.qemu_return_ip = state.asm_parsing_state.qemu_return_ip;
+    // if(tip_data->ip == state.qemu_caller_ip && 
+    //    state.qemu_return_ip == 0 && use_asm) {
+    //     // If we have just set the qemu_caller_ip, after updating the 
+    //     // current ip the first basic block of asm will be parsed 
+    //     // we can use this to get the qemu_return_ip, jumped to prior to 
+    //     // leaving jit code. It is always the last jmp in a block 
+    //     state.qemu_return_ip = state.asm_parsing_state.qemu_return_ip;
 
-        printf_debug(
-            "  Setting: qemu_return_ip: 0x%lX\n", state.qemu_return_ip
-        );
-    }
+    //     printf_debug(
+    //         "  Setting: qemu_return_ip: 0x%lX\n", state.qemu_return_ip
+    //     );
+    // }
 
     // reset if needed 
-    state.next_tip_is_breakpoint = false;
+    // state.next_tip_is_breakpoint = false;
 }
 
 
@@ -478,7 +508,7 @@ static inline void update_current_ip(
 
     // Check if we can advance the asm
     if(state.current_ip == state.qemu_caller_ip && use_asm) {
-        advance_to_ipt_start(state.asm_parsing_state);
+        advance_to_ipt_start(state.asm_parsing_state, state.mapping_state);
     }
 
     // Check if this ip is jitted code 
@@ -487,7 +517,7 @@ static inline void update_current_ip(
     );
 
     // Check if this ip maps to a basic block
-    u64 guest_ip = get_mapping(state.current_ip);
+    u64 guest_ip = get_mapping(state.mapping_state, state.current_ip);
 
     state.last_ip_had_mapping = guest_ip != 0;
 
@@ -578,11 +608,6 @@ static inline void print_packet_debug(pt_packet& packet, pt_state& state)
 /* ***** Concurrent Parsing ***** */
 static std::optional<pt_packet> try_get_next_packet(pt_state& state)
 {
-#ifdef DEBUG_TIME_
-    static u8 last_percentage = -1;
-#endif
-    // Todo: need to move this out of the function into pt_state 
-    static u64 last_tip_ip = 0;
 
 #ifdef DEBUG_MODE_
     u64 old_offset = state.offset;
@@ -594,21 +619,21 @@ static std::optional<pt_packet> try_get_next_packet(pt_state& state)
     }
 
 #ifdef DEBUG_TIME_
-    if((u8)(((double)state.offset / state.size) * 100) != last_percentage) {
-        last_percentage = ((double)state.offset / state.size) * 100;
-        fprintf(stderr, "TIME: %u%%\n", last_percentage);
-        printf("TIME: %u%%\n", last_percentage);
+    if((u8)(((double)state.offset / state.size) * 100) != state.last_percentage) {
+        state.last_percentage = ((double)state.offset / state.size) * 100;
+        fprintf(stderr, "TIME: %u%%\n", state.last_percentage);
+        printf("TIME: %u%%\n", state.last_percentage);
     }
 #endif
 
-    pt_packet packet = get_next_packet(state, last_tip_ip);
+    pt_packet packet = get_next_packet(state, state.packet_only_last_tip_ip);
 
 #ifdef DEBUG_MODE_
     if(packet.type != PAD) printf("OFST: %lu: ", old_offset);
 #endif
 
     if(packet.type == TIP) {
-        last_tip_ip = packet.tip_data.ip;
+        state.packet_only_last_tip_ip = packet.tip_data.ip;
     }
 
     return { packet };
@@ -622,31 +647,31 @@ static inline pt_packet get_next_packet(pt_state& state, u64 curr_ip)
     
     RETURN_IF(parse_psb);
     RETURN_IF(parse_psb_end);
-    RETURN_IF(parse_short_tnt);
-    RETURN_IF(parse_long_tnt);
+    // RETURN_IF(parse_short_tnt);
+    // RETURN_IF(parse_long_tnt);
     RETURN_IF_2(parse_tip, curr_ip);
     RETURN_IF(parse_pip);
     RETURN_IF(parse_mode);
-    RETURN_IF(parse_trace_stop);
-    RETURN_IF(parse_cbr);
-    RETURN_IF(parse_tsc);
-    RETURN_IF(parse_mtc);
-    RETURN_IF(parse_tma);
-    RETURN_IF(parse_vmcs);
-    RETURN_IF(parse_ovf);
-    RETURN_IF(parse_cyc);
-    RETURN_IF(parse_mnt);
-    RETURN_IF(parse_pad);
-    RETURN_IF(parse_ptw);
-    RETURN_IF(parse_exstop);
-    RETURN_IF(parse_mwait);
-    RETURN_IF(parse_pwre);
-    RETURN_IF(parse_pwrx);
-    RETURN_IF(parse_bbp);
-    RETURN_IF(parse_bip);
-    RETURN_IF(parse_bep);
-    RETURN_IF(parse_cfe);
-    RETURN_IF(parse_evd);
+    // RETURN_IF(parse_trace_stop);
+    // RETURN_IF(parse_cbr);
+    // RETURN_IF(parse_tsc);
+    // RETURN_IF(parse_mtc);
+    // RETURN_IF(parse_tma);
+    // RETURN_IF(parse_vmcs);
+    // RETURN_IF(parse_ovf);
+    // RETURN_IF(parse_cyc);
+    // RETURN_IF(parse_mnt);
+    // RETURN_IF(parse_pad);
+    // RETURN_IF(parse_ptw);
+    // RETURN_IF(parse_exstop);
+    // RETURN_IF(parse_mwait);
+    // RETURN_IF(parse_pwre);
+    // RETURN_IF(parse_pwrx);
+    // RETURN_IF(parse_bbp);
+    // RETURN_IF(parse_bip);
+    // RETURN_IF(parse_bep);
+    // RETURN_IF(parse_cfe);
+    // RETURN_IF(parse_evd);
 
     parse_unkown(state, packet);
 
@@ -1390,8 +1415,9 @@ static void print_tnt(const pt_packet& packet)
 
 
 /* ***** File Management ***** */
-static void load_trace_file(pt_state& state, const char *file_name)
-{
+static void load_trace_file(
+    pt_state& state, const char *file_name, u64 start_offset
+) {
     state.trace_data = fopen(file_name, "rb");
 
     if(state.trace_data == NULL) {
@@ -1402,9 +1428,10 @@ static void load_trace_file(pt_state& state, const char *file_name)
     // Get length of the file 
     fseek(state.trace_data, 0L, SEEK_END);
     state.size = ftell(state.trace_data);
-    fseek(state.trace_data, 0L, SEEK_SET);
-
-    state.offset = 0;
+    fseek(state.trace_data, start_offset, SEEK_SET);
+    
+    state.offset = start_offset;
+    state.buffer = (u8*) calloc(BUFFER_SIZE, sizeof(u8));
 
     __load_data_into_buffer(state);
 }
@@ -1413,9 +1440,9 @@ static void load_trace_file(pt_state& state, const char *file_name)
 static void __advance(pt_state& state, u8 n)
 {
     state.offset += n; // Track global pos 
-    _pos_in_buffer += n; // Track local pos 
+    state.pos_in_buffer += n; // Track local pos 
 
-    if(_pos_in_buffer < BUFFER_SIZE) return;
+    if(state.pos_in_buffer < BUFFER_SIZE) return;
 
     __load_data_into_buffer(state);
 }
@@ -1423,30 +1450,30 @@ static void __advance(pt_state& state, u8 n)
 
 static void __get_bytes(pt_state& state, u8 *buffer, u8 n)
 {
-    if(_pos_in_buffer + n >= BUFFER_SIZE) {  
+    if(state.pos_in_buffer + n >= BUFFER_SIZE) {  
         __load_data_into_buffer(state);
     }
 
-    memcpy(buffer, _buffer + _pos_in_buffer, n);
+    memcpy(buffer, state.buffer + state.pos_in_buffer, n);
 }
 
 
 static void __load_data_into_buffer(pt_state& state)
 {
-    size_t old_data = (_pos_in_buffer == 0) ? 
-        0 : BUFFER_SIZE - _pos_in_buffer; 
+    size_t old_data = (state.pos_in_buffer == 0) ? 
+        0 : BUFFER_SIZE - state.pos_in_buffer; 
 
     if(old_data > 0) {
         memcpy(
-            _buffer, _buffer + _pos_in_buffer, old_data
+            state.buffer, state.buffer + state.pos_in_buffer, old_data
         );
     }
 
     size_t new_data = BUFFER_SIZE - old_data;
 
-    fread(_buffer + old_data, new_data, 1, state.trace_data);
+    fread(state.buffer + old_data, new_data, 1, state.trace_data);
 
-    _pos_in_buffer = 0; // Reset local position
+    state.pos_in_buffer = 0; // Reset local position
 }
 
 static void load_output_file(pt_state& state, const char *file_name)

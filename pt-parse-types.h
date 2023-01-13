@@ -3,6 +3,7 @@
 
 #include "types.h"
 #include "asm-types.h"
+#include "mapping-parse.h"
 
 #include <stdbool.h>
 
@@ -213,8 +214,28 @@ struct pt_state {
     /* Tracck the current offset in the trace file */
     u64 offset;
 
+    /* Concurrent start and end */
+    u64 start_offset;
+    u64 end_offset;
+
+    /* buffer to store the raw intelpt data */
+    u8 *buffer;
+
+    /* current possition in the buffer */
+    u32 pos_in_buffer;
+
+    /* debuggint store the last percentage size */
+    u8 last_percentage;
+
+    /* Used only when getting tip packets */
+    u64 packet_only_last_tip_ip;
+
     /* Store the current state of the assembly code */
     asm_state asm_parsing_state;
+
+    /* Store the current mapping state */
+    mapping_state_t mapping_state;
+
 
     pt_state() : 
         current_ip(0),
@@ -240,7 +261,13 @@ struct pt_state {
         out_file(NULL),
         trace_data(NULL),
         size(0),
-        offset(0) {};
+        offset(0),
+        start_offset(0),
+        end_offset(0),
+        buffer(NULL),
+        pos_in_buffer(0),
+        last_percentage(0),
+        packet_only_last_tip_ip(0) {};
 };
 
 #endif

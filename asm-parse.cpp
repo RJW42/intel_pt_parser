@@ -125,7 +125,7 @@ static inline void save_instruction(
 }
 
 
-void advance_to_ipt_start(asm_state& state)
+void advance_to_ipt_start(asm_state& state, mapping_state_t& mapping_state)
 {
     static int calls = 0; calls++;
 
@@ -146,7 +146,7 @@ void advance_to_ipt_start(asm_state& state)
         // Handle the parsed trace element
         switch (local_state.current_element.type) {
         case BLOCK: 
-            handle_block(state, local_state);
+            handle_block(state, mapping_state, local_state);
             break;
         case BLOCK_SIZE: 
             handle_block_size(state, local_state);
@@ -189,7 +189,8 @@ void advance_to_ipt_start(asm_state& state)
 /* ******** Buliding Data ******** */
 
 static inline void handle_block(
-    asm_state& global_state, advance_state& state
+    asm_state& global_state, mapping_state_t& mapping_state, 
+    advance_state& state
 ) {
     // Store the block start
     if(state.current_block != NULL) {
@@ -203,7 +204,7 @@ static inline void handle_block(
         state.current_element.block_ip;
 
     state.current_block->guest_ip = 
-        get_mapping(state.current_element.block_ip);
+        get_mapping(mapping_state, state.current_element.block_ip);
     
     //  todo: maybe want to check if there if there are unset jumps 
 }

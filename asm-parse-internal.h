@@ -9,6 +9,7 @@
 #include "types.h"
 #include "asm-parse.h"
 #include "asm-types.h"
+#include "mapping-parse.h"
 
 #include "robbin_hood.h"
 
@@ -41,7 +42,7 @@ static inline bool parse_jxx_ldst(std::string& line, trace_element& out);
 static inline bool parse_call(std::string& line, trace_element& out);
 
 
-static inline void handle_block(asm_state& global_state, advance_state& state);
+static inline void handle_block(asm_state& global_state, mapping_state_t& mapping_state, advance_state& state);
 static inline void handle_block_size(asm_state& global_state, advance_state& state);
 static inline void handle_jmp(asm_state& global_state, advance_state& state);
 static inline void handle_computed_jmp(asm_state& global_state, advance_state& state);

@@ -36,7 +36,9 @@ static jit_asm_instruction* get_next_instr(
 static bool can_follow_asm(pt_state& state);
 
 static void load_output_file(pt_state& state, const char *file_name);
-static void load_trace_file(pt_state& state, const char *file_name);
+static void load_trace_file(
+    pt_state& state, const char *file_name, u64 start_offset
+);
 
 static void parse(pt_state& state);
 
