@@ -1,1 +1,3 @@
 trace_*
+*.o
+parser

@@ -5,13 +5,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <cerrno>
 
 #define BUFFER_SIZE 1024
 
 static const char default_data_folder[] = "/home/rjw24/pt-trace-data/";
 static const char asm_file_name[]       = "asm-trace.txt";
-static const char pt_trace_file_name[]  = "intel-pt-data.pt";
-static const char mapping_file_name[]   = "mapping-data.mpt";
+static const char pt_trace_file_name[]  = "data.pt";
+static const char mapping_file_name[]   = "mapping.txt";
 static const char out_file_name[]       = "trace.txt";
 static const char version_file_name[]   = "trace.info";
 
@@ -24,7 +25,7 @@ char* append_num(const char* s1, u32 number);
 void* run_start(void* _args);
 void run_concurrently(
     u32 num_threads, char *out_file, char *mapping_file, 
-    char *pt_trace_file, char *asm_file, bool use_asm, u64 file_size
+    char *pt_trace_file, bool use_asm, u64 file_size
 );
 
 struct start_args {
@@ -42,37 +43,32 @@ int main(int argc, char *argv[])
 {
     const char *data_folder = parse_arguments(argc, argv);
 
-    char *version_file  = append_strs(data_folder, version_file_name);
-    char *out_file      = append_strs(data_folder, out_file_name);
+    char *out_file      = append_strs("./", out_file_name);
     char *mapping_file  = append_strs(data_folder, mapping_file_name);
     char *pt_trace_file = append_strs(data_folder, pt_trace_file_name);
-    char *asm_file      = append_strs(data_folder, asm_file_name);
 
-    u32 version = get_version_number(version_file);
     u64 file_size = get_file_size(pt_trace_file);
 
-    bool use_asm = !(version == 0 || version == 1 || version == 2 || version == 5);
-
+    bool use_asm = false;
     int num_threads = 6;
 
-    if (version == 5) 
-        run_concurrently(
-            num_threads, out_file, mapping_file,
-            pt_trace_file, asm_file, use_asm, file_size
-        );
-    else if (!(version == 0 || version == 1))
-        start(
-            asm_file, pt_trace_file, 
-            mapping_file, out_file, 
-            0, file_size, use_asm
-        );
+    run_concurrently(
+        num_threads, out_file, mapping_file,
+        pt_trace_file, use_asm, file_size
+    );
+
+    // start(
+    //     nullptr, pt_trace_file, 
+    //     mapping_file, out_file, 
+    //     0, file_size, use_asm
+    // );
 
     printf("Done\n");
 }   
 
 void run_concurrently(
     u32 num_threads, char *out_file, char *mapping_file, 
-    char *pt_trace_file, char *asm_file, bool use_asm, u64 file_size
+    char *pt_trace_file, bool use_asm, u64 file_size
 ) {
     pthread_t *threads = (pthread_t*) calloc(num_threads, sizeof(pthread_t));
     start_args *args = (start_args*) calloc(num_threads, sizeof(start_args));
@@ -92,7 +88,7 @@ void run_concurrently(
 
         args[i].mapping_file = mapping_file;
         args[i].pt_trace_file = pt_trace_file;
-        args[i].asm_file = asm_file;
+        args[i].asm_file = nullptr;
         args[i].use_asm = use_asm;
         args[i].start_offset = start_offset;
         args[i].end_offset = end_offset;
@@ -202,6 +198,10 @@ u32 get_version_number(const char *verion_file_name)
 u64 get_file_size(const char *file_name) 
 {
     FILE *fp = fopen(file_name, "rb");   
+
+    if(!fp) {
+        fprintf(stderr, "Failed to open file %s to read size %s\n", file_name, strerror(errno));
+    }
 
     fseek(fp, 0L, SEEK_END);
     u64 size = ftell(fp);
