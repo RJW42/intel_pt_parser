@@ -9,16 +9,16 @@
 
 #define BUFFER_SIZE 1024
 
-static const char default_data_folder[] = "/home/rjw24/pt-trace-data/";
-static const char asm_file_name[]       = "asm-trace.txt";
-static const char pt_trace_file_name[]  = "data.pt";
-static const char mapping_file_name[]   = "mapping.txt";
+// static const char default_data_folder[] = "/home/rjw24/pt-trace-data/";
+// static const char asm_file_name[]       = "asm-trace.txt";
+// static const char pt_trace_file_name[]  = "data.pt";
+// static const char mapping_file_name[]   = "mapping.txt";
 static const char out_file_name[]       = "trace.txt";
 static const char version_file_name[]   = "trace.info";
 
 u32 get_version_number(const char *verion_file_name);
 u64 get_file_size(const char *file_name);
-const char* parse_arguments(int argc, char *argv[]);
+void parse_arguments(int argc, char *argv[], char *parsed_args[]);
 char* append_strs(const char* s1, const char* s2);
 char* append_num(const char* s1, u32 number);
 
@@ -39,13 +39,20 @@ struct start_args {
 };
 
 
+/*  Expected Arguments 
+ *      trace_output_location mapping_file pt_data_file
+ */
 int main(int argc, char *argv[]) 
 {
-    const char *data_folder = parse_arguments(argc, argv);
+    if (argc != 4) {
+        fprintf(stderr, "Error invalid arguments expected\n");
+        fprintf(stderr, "    parser <trace_outout_location> <mapping_file> <pt_data_file>\n");
+        exit(1);
+    }
 
-    char *out_file      = append_strs("./", out_file_name);
-    char *mapping_file  = append_strs(data_folder, mapping_file_name);
-    char *pt_trace_file = append_strs(data_folder, pt_trace_file_name);
+    char *out_file      = append_strs(argv[1], out_file_name);
+    char *mapping_file  = argv[2];
+    char *pt_trace_file = argv[3];
 
     u64 file_size = get_file_size(pt_trace_file);
 
@@ -131,20 +138,6 @@ void* run_start(void* _args) {
     );
 
     pthread_exit(NULL);
-}
-
-
-const char* parse_arguments(int argc, char *argv[]) {
-    if (argc == 1) {
-        return default_data_folder;
-    } else if (argc == 2) {
-        return argv[1];
-    } 
-
-    fprintf(stderr, "Error: expected at max one argument\n");
-    fprintf(stderr, "   Ussage: ./parser [parsing data location]\n");
-    exit(EXIT_FAILURE);
-    return NULL;
 }
 
 char* append_strs(const char* s1, const char* s2) {
