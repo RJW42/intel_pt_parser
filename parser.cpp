@@ -44,15 +44,20 @@ struct start_args {
  */
 int main(int argc, char *argv[]) 
 {
-    if (argc != 4) {
+    if (argc != 4 && argc != 3) {
         fprintf(stderr, "Error invalid arguments expected\n");
         fprintf(stderr, "    parser <trace_outout_location> <mapping_file> <pt_data_file>\n");
+        fprintf(stderr, "    parser <trace_outout_location> <pt_data_file>\n");
         exit(1);
     }
 
     char *out_file      = append_strs(argv[1], out_file_name);
-    char *mapping_file  = argv[2];
-    char *pt_trace_file = argv[3];
+    char *pt_trace_file = argv[argc - 1];
+    char *mapping_file  = nullptr; 
+
+    if (argc == 4) {
+        mapping_file = argv[2];
+    }
 
     u64 file_size = get_file_size(pt_trace_file);
 

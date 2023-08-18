@@ -68,6 +68,7 @@ static void __load_data_into_buffer(pt_state& state);
 
 
 void test(pt_state& state);
+void test_ptwrite(pt_state& state);
 
 
 void start(
@@ -76,11 +77,14 @@ void start(
     u64 start_offset, u64 end_offset,
     bool _use_asm
 ){
+    bool use_pt_write = mapping_file == nullptr;
     use_asm = _use_asm;
 
     pt_state state; 
 
-    load_mapping_file(state.mapping_state, mapping_file);
+    if (!use_pt_write) {
+        load_mapping_file(state.mapping_state, mapping_file);
+    }
 
     if(use_asm) { 
         asm_init(state.asm_parsing_state, asm_file);
@@ -91,7 +95,12 @@ void start(
 
     state.end_offset = end_offset;
 
-    test(state);
+    /* Main Parsing */
+    if (use_pt_write) {
+        test_ptwrite(state);
+    } else {
+        test(state);   
+    }
 
     if(state.previous_guest_ip != 0) {
         // Record the lat basic block which may have 
@@ -200,6 +209,40 @@ void test(pt_state& state)
             state.in_psb = false;
         } else if(packet.type == TIP) {
             handle_tip(state);
+        }
+
+        state.last_was_mode = false;
+        state.last_was_ovf = false;
+
+        if(packet.type == MODE) {
+            state.last_was_mode = true;
+        } else if(packet.type == OVF) {
+            state.last_was_ovf = true;
+        }
+    }
+}
+
+void test_ptwrite(pt_state& state) 
+{
+    advance_to_first_psb(state);
+
+    std::optional<pt_packet> maybe_packet;
+
+    while((maybe_packet = try_get_next_packet(state))) {
+        pt_packet packet = *maybe_packet;
+
+        state.last_packet = &packet;
+
+        if(packet.type == PSB) {
+            state.in_psb = true;
+
+            if (state.offset > state.end_offset) {
+                return;
+            }
+        } else if(packet.type == PSBEND) {
+            state.in_psb = false;
+        } else if(packet.type == PTW) {
+            log_basic_block(state, packet.ptw_packet_data);
         }
 
         state.last_was_mode = false;
@@ -1113,9 +1156,21 @@ static inline bool parse_ptw(pt_state& state, pt_packet& packet)
     u8 packet_length = PTW_HEADER_LENGTH + 
         (payload_bits == PTW_L1_CODE) ? PTW_BODY_LENGTH_1 : PTW_BODY_LENGTH_2;
 
-    ADVANCE(packet_length);
+    if(!LEFT(packet_length))
+        return false;
 
     packet.type = PTW;
+
+    INIT_BUFFER(buffer, packet_length);
+    u64 data = 0;
+
+    for (int i = 0; i < packet_length - PTW_HEADER_LENGTH; ++i) {
+        data = (data << 8) + buffer[packet_length - i];
+    }
+
+    packet.ptw_packet_data = data;
+
+    ADVANCE(packet_length);
 
     return true;
 }

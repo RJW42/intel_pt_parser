@@ -89,6 +89,7 @@ struct pt_packet {
         tnt_packet_data tnt_data;
         tip_packet_data tip_data;
         unkown_packet_data unkown_data;
+        u64 ptw_packet_data;
     };
 
     pt_packet(pt_packet_type type) : 
